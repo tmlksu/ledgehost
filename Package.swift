@@ -50,9 +50,17 @@ let package = Package(
             ],
             path: "Sources/tls-spike"
         ),
+        .target(
+            name: "LedgehostCore",
+            dependencies: [
+                "StreamProtocol",
+            ],
+            path: "Sources/LedgehostCore"
+        ),
         .executableTarget(
             name: "ledgehostd",
             dependencies: [
+                "LedgehostCore",
                 "StreamProtocol",
                 .product(name: "Crypto", package: "swift-crypto"),
                 .product(name: "NIO", package: "swift-nio"),
@@ -65,6 +73,7 @@ let package = Package(
         .executableTarget(
             name: "ledgehost-probe",
             dependencies: [
+                "LedgehostCore",
                 "StreamProtocol",
                 .product(name: "Crypto", package: "swift-crypto"),
                 .product(name: "NIO", package: "swift-nio"),
@@ -81,6 +90,14 @@ let package = Package(
                 .product(name: "Crypto", package: "swift-crypto"),
             ],
             path: "Tests/StreamProtocolTests"
+        ),
+        .testTarget(
+            name: "LedgehostCoreTests",
+            dependencies: [
+                "LedgehostCore",
+                "StreamProtocol",
+            ],
+            path: "Tests/LedgehostCoreTests"
         ),
     ]
 )

@@ -5,6 +5,7 @@ import NIOCore
 import NIOSSL
 import NIOTLS
 import StreamProtocol
+import LedgehostCore
 #if canImport(Glibc)
 import Glibc
 #endif
@@ -19,6 +20,9 @@ setvbuf(stdout, nil, _IONBF, 0)
 //
 //   ledgehost-probe pair    --host H --port P --code 482913557208
 //   ledgehost-probe connect --host H --port P
+//   ledgehost-probe record  --host H --port P --seconds N --out DIR
+//                           (subscribes to the desktop, saves kind 0/1
+//                           payloads plus a reassembled .h265 stream)
 //
 // Fingerprints always come from the TLS session, never from a message.
 // After pairing, the probe saves the host's fingerprint, Mac ID and
@@ -30,6 +34,8 @@ struct Args {
     var host: String = "127.0.0.1"
     var port: Int = 7455
     var code: String?
+    var seconds: Double = 10
+    var out: String = "recording"
 }
 
 func parseArgs() -> Args {
@@ -41,6 +47,8 @@ func parseArgs() -> Args {
         case "--host": args.host = it.next() ?? args.host
         case "--port": args.port = Int(it.next() ?? "") ?? args.port
         case "--code": args.code = it.next()
+        case "--seconds": args.seconds = Double(it.next() ?? "") ?? args.seconds
+        case "--out": args.out = it.next() ?? args.out
         default: break
         }
     }
@@ -48,8 +56,8 @@ func parseArgs() -> Args {
 }
 
 let args = parseArgs()
-guard args.mode == "pair" || args.mode == "connect" else {
-    fputs("usage: ledgehost-probe pair --code <12 digits> [--host H] [--port P]\n       ledgehost-probe connect [--host H] [--port P]\n", stderr)
+guard ["pair", "connect", "record"].contains(args.mode) else {
+    fputs("usage: ledgehost-probe pair --code <12 digits> [--host H] [--port P]\n       ledgehost-probe connect [--host H] [--port P]\n       ledgehost-probe record [--host H] [--port P] [--seconds N] [--out DIR]\n", stderr)
     exit(64)
 }
 
@@ -244,6 +252,79 @@ if args.mode == "pair" {
     try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: savedHostURL.path)
     print("probe: PAIRED with \(saved.name) (\(macID)); pin saved")
     try? channel.close().wait()
+} else if args.mode == "record" {
+    // P1-M1 record mode: subscribe to the desktop, save every kind 0/1
+    // payload with its header flags and timestamp, and reassemble an
+    // Annex B elementary stream for ffprobe verification.
+    guard let saved = savedHost else {
+        fputs("probe: no saved host — pair first\n", stderr); exit(64)
+    }
+    let outDir = URL(fileURLWithPath: args.out)
+    try FileManager.default.createDirectory(at: outDir, withIntermediateDirectories: true)
+    let framesURL = outDir.appendingPathComponent("frames")
+    let streamURL = outDir.appendingPathComponent("stream.h265")
+    let metaURL = outDir.appendingPathComponent("record.jsonl")
+    try FileManager.default.createDirectory(at: framesURL, withIntermediateDirectories: true)
+    FileManager.default.createFile(atPath: streamURL.path, contents: nil)
+    FileManager.default.createFile(atPath: metaURL.path, contents: nil)
+    let streamOut = try FileHandle(forWritingTo: streamURL)
+    let metaOut = try FileHandle(forWritingTo: metaURL)
+
+    let hostBox = HostBox()
+    let collector = Collector()
+    var parameterSets: [Data] = []
+    var frameIndex = 0
+    var listSeen = false
+    var firstFrame = false
+    collector.onMessage = { kind, payload in
+        switch kind {
+        case .windowList:
+            listSeen = true
+        case .parameterSets:
+            guard let ps = ParameterSets(encoded: payload) else {
+                print("probe: undecodable kind 0 — ignored"); return
+            }
+            parameterSets = ps.sets
+            for s in ps.sets { try? streamOut.write(contentsOf: AnnexB.startCoded(s)) }
+            try? metaOut.write(contentsOf: Data(
+                "{\"k\":0,\"sets\":\(ps.sets.count),\"nalLen\":\(ps.nalUnitHeaderLength)}\n".utf8))
+        case .frame:
+            let c = frameIndex
+            frameIndex += 1
+            let name = String(format: "frame-%05d.lp", c)
+            try? payload.write(to: framesURL.appendingPathComponent(name))
+            guard let nals = WireReassemble.splitLengthPrefixed(payload) else {
+                print("probe: frame \(c) does not split as length-prefixed NALs — skipped")
+                return
+            }
+            for n in nals { try? streamOut.write(contentsOf: AnnexB.startCoded(n)) }
+            let types = nals.map { ($0[$0.startIndex] >> 1) & 0x3f }
+            try? metaOut.write(contentsOf: Data(
+                "{\"k\":1,\"i\":\(c),\"bytes\":\(payload.count),\"idr\":\(types.contains(19) || types.contains(20))}\n".utf8))
+            firstFrame = true
+        default: break
+        }
+    }
+    let channel = try connect(alpn: "sill/1", hostBox: hostBox, collector: collector)
+    guard waitFor(5, until: { hostBox.fingerprint != nil }) else {
+        fputs("probe: handshake did not complete\n", stderr); exit(1)
+    }
+    guard Base64URL.encode(hostBox.fingerprint!) == saved.fingerprint else {
+        print("probe: PIN MISMATCH — refusing"); try? channel.close().wait(); exit(1)
+    }
+    send(channel, kind: .hello, payload: Wire.encode(Hello(appVersion: "0.0.0-probe", protocol: 1,
+                                                           device: "ledgehost-probe", audio: [])))
+    guard waitFor(5, until: { listSeen }) else {
+        fputs("probe: no window list received\n", stderr); exit(1)
+    }
+    send(channel, kind: .selectSource, payload: Wire.encode(StreamSource.desktop))
+    _ = waitFor(args.seconds + 5, until: { false })
+    try? channel.close().wait()
+    try? streamOut.close()
+    try? metaOut.close()
+    print("probe: recorded \(frameIndex) frame(s), \(parameterSets.count) parameter set(s) -> \(outDir.path)")
+    print("probe: verify with: ffprobe -v error -count_frames -select_streams v:0 -show_entries stream=nb_read_frames,width,height,coded_width,coded_height -of default=nw=1 \(streamURL.path)")
+    exit(firstFrame && !parameterSets.isEmpty ? 0 : 1)
 } else {
     guard let saved = savedHost else {
         fputs("probe: no saved host — pair first\n", stderr); exit(64)

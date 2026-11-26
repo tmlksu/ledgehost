@@ -422,3 +422,44 @@ injection is solid and held-state release is proven).
   iGPU and vapostproc the measured fallback. GATE PASSES
   (lower rate would have adjusted fps targets; a full-rate
   path exists).
+- 2026-11-26: P1-M1 verification results (fixture: videotestsrc
+  pattern 18 through the real helper pipeline; committed as
+  Tests/LedgehostCoreTests/Fixtures/testsrc-320x240.lhm1):
+  * FORCE-KEY-UNIT → REAL IDR: FAILED for vah265lpenc on this
+    iGPU. Its force-key-unit path only "promotes its type from
+    P to I" (gstvah265enc.c debug): the flagged frame is a
+    non-IDR I-slice ([PPS, TRAIL]) a joining decoder cannot
+    start from — ffprobe reports "Could not find ref" and the
+    reference window is not flushed. A momentary
+    key-int-max=1 toggle does not help (GOP structure is fixed
+    per GOP). WORKAROUND ADOPTED (deviation from the plan's
+    encoder choice): the helper encodes with msdkh265enc
+    (same Quick Sync hardware, accepts system-memory NV12 from
+    videoconvert, bitrate PLAYING-writable). Measured: each
+    KEYFRAME command produces a real IDR — NAL types
+    [VPS,SPS,PPS,SEI(39),IDR(19)] — and SET_BITRATE/STOP work
+    per spec. gop-size=300 replaces key-int-max; msdk's VBV
+    knob (max-vbv-bitrate, a rate) is left at auto — the
+    cpb-size (kilobits) finding applies to the va element and
+    is unused. If a future iGPU/driver regains a working va
+    IDR path this can be revisited.
+  * IDR SIZE at catalog settings (1600x1200, 60 fps, 15 Mbps,
+    testsrc): 31249 bytes (~250 kbit) per forced IDR — ~1.6 %
+    of the per-second budget. Decision 4's high-water mark
+    resolves to max(4 MiB, 2xIDR) = 4 MiB on synthetic content;
+    real-desktop IDRs will be larger but stay under the 32 MiB
+    frame cap.
+  * CODED vs DISPLAY WIDTH: ffprobe on the reassembled stream
+    reports width==coded_width and height==coded_height at
+    both 320x240 and 1600x1200 — no conformance crop on this
+    encoder at the target geometry.
+  * Wire round-trip: kind 0 (ParameterSets.encoded, 3 sets) +
+    60 kind 1 length-prefixed AUs reassembled to Annex B decode
+    cleanly in ffprobe/ffmpeg with the expected 60 frames.
+  * Unit tests: LedgehostCore target added (LHM1 reader, Annex
+    B converter, generated keymap); 13 new tests, all green;
+    the 24 existing tests still pass.
+  * Header bug found and fixed in review: the LHM1 record
+    header is 20 bytes (magic4+ver1+tag1+flags1+res1+ts8+len4);
+    the first helper build wrote length over the timestamp's
+    low bytes.
