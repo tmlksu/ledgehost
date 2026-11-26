@@ -253,3 +253,22 @@ muxed to MP4) was served over HTTP and played back on the iPad
 Air in Safari with no error: the target machine's encoder output
 is accepted by the client's decoder stack. This closes the last
 open item of 0-A.
+
+## Progress — unpair behaviour observed; Phase 0 complete (2026-11-26)
+
+With the client watching, the host-side pairing was removed and
+the daemon restarted. The client retried every ~5 s and was
+closed at the gate each time (20 attempts). On the client, the
+app fell back to its first screen ("Connect to Mac"), the host
+vanished from the list and reappeared, and tapping it ended at
+"isn't answering. It may be asleep..." — an unpaired gate-closed
+host is indistinguishable from a sleeping one on this path, and
+no re-pairing is offered there; re-pairing goes through the
+manual address + port + code flow, which restored the pairing
+immediately.
+
+That was the last open item. Phase 0 verdict: complete — the
+protocol core, identity, pairing, TLS gate and catalog are
+accepted by the genuine client on the target machine, and the
+media prerequisites (VA HEVC low-power encode, capture path)
+are measured and green.
