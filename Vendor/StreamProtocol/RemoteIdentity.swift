@@ -1,6 +1,14 @@
+// Linux port (ledgehost): modified from the upstream v0.6.2 file — see Vendor/VENDORED.md.
 import Foundation
+#if canImport(Security)
 import Security
+#endif
+#if canImport(CryptoKit)
 import CryptoKit
+#else
+import Crypto
+import SillLinuxShims
+#endif
 
 // Identities for the remote door (docs/remote-access-plan.md §3.4): one P-256 key per Mac install
 // and one per device install. Nothing here names or dates anything that matters: trust is the key
@@ -42,6 +50,7 @@ public enum SPKI {
         Data(SHA256.hash(data: der(point: point)))
     }
 
+    #if canImport(Security)
     /// The fingerprint of a P-256 public (or private) key; nil for any other kind of key.
     public static func fingerprint(of key: SecKey) -> Data? {
         let pub = SecKeyCopyPublicKey(key) ?? key
@@ -58,6 +67,17 @@ public enum SPKI {
     public static func fingerprint(of certificate: SecCertificate) -> Data? {
         SecCertificateCopyKey(certificate).flatMap { fingerprint(of: $0) }
     }
+    #else
+    /// The fingerprint of a P-256 public key (Linux, swift-crypto).
+    public static func fingerprint(of key: P256.Signing.PublicKey) -> Data {
+        fingerprint(point: key.x963Representation)
+    }
+
+    /// The fingerprint of a P-256 private key (Linux, swift-crypto).
+    public static func fingerprint(of key: P256.Signing.PrivateKey) -> Data {
+        fingerprint(point: key.publicKey.x963Representation)
+    }
+    #endif
 }
 
 /// The Mac ID: Crockford base32 of the fingerprint's first 10 bytes (80 bits, most significant bits
@@ -96,6 +116,7 @@ public enum SelfSignedCertificate {
     /// nothing, so a certificate says nothing about the Mac or the device), valid from 2026-01-01
     /// to 9999-12-31. About 310 bytes. Rebuilt at every launch from the stored key: the pin is the
     /// key, so the certificate is never stored. Nil if the key cannot sign.
+    #if canImport(Security)
     public static func make(key: SecKey) -> Data? {
         guard let pub = SecKeyCopyPublicKey(key),
               let point = SecKeyCopyExternalRepresentation(pub, nil) as Data?, point.count == 65 else { return nil }
@@ -120,10 +141,39 @@ public enum SelfSignedCertificate {
         guard let sig = SecKeyCreateSignature(key, .ecdsaSignatureMessageX962SHA256, Data(tbs) as CFData, nil) as Data? else { return nil }
         return Data(DER.sequence([tbs, algorithm, DER.bitString([UInt8](sig))]))
     }
+    #else
+    /// The same hand-built certificate, signed with a swift-crypto key
+    /// (Linux). The signature is DER-encoded ECDSA P-256/SHA-256 over the
+    /// TBS bytes, exactly as the SecKey path produces.
+    public static func make(key: P256.Signing.PrivateKey) -> Data? {
+        let point = key.publicKey.x963Representation
+        guard point.count == 65 else { return nil }
+        var cn = [UInt8](repeating: 0, count: 8)
+        var serial = [UInt8](repeating: 0, count: 16)
+        guard SillLinuxShims.Random.fill(&cn), SillLinuxShims.Random.fill(&serial) else { return nil }
+        serial[0] = (serial[0] & 0x7F) | 0x01          // positive, and no leading zero byte to trim
+        let hex = cn.map { String(format: "%02x", $0) }.joined()
+        let name = DER.sequence([DER.set([DER.sequence([DER.oid(DER.commonName), DER.tlv(0x0C, Array(hex.utf8))])])])
+        let algorithm = DER.sequence([DER.oid(DER.ecdsaWithSHA256)])
+        let tbs = DER.sequence([
+            DER.tlv(0xA0, DER.integer([2])),                      // [0] EXPLICIT version: v3
+            DER.integer(serial),
+            algorithm,
+            name,                                                 // issuer
+            DER.sequence([DER.tlv(0x17, Array("260101000000Z".utf8)),     // UTCTime
+                          DER.tlv(0x18, Array("99991231235959Z".utf8))]), // GeneralizedTime
+            name,                                                 // subject
+            [UInt8](SPKI.der(point: point)),
+        ])
+        guard let signature = try? key.signature(for: Data(tbs)) else { return nil }
+        return Data(DER.sequence([tbs, algorithm, DER.bitString([UInt8](signature.derRepresentation))]))
+    }
+    #endif
 }
 
 /// A key and the certificate made from it, ready for TLS: what `RemoteTLS.options` presents.
 /// The host builds one from its stored key at launch, the device from its own.
+#if canImport(Security)
 public struct RemoteIdentity: @unchecked Sendable {
     public let privateKey: SecKey
     public let certificate: SecCertificate
@@ -151,10 +201,12 @@ public struct RemoteIdentity: @unchecked Sendable {
     /// "5KD2Q7": the first characters of the Mac ID form of a fingerprint, for log lines and lists.
     public static func shortName(_ fingerprint: Data) -> String { String(MacID.make(fingerprint: fingerprint).prefix(6)) }
 }
+#endif
 
 /// P-256 keys that live only in memory (the CLI's --remote, test identities) or in a file (TEST
 /// ONLY stores). The app's and the device's keychain keys are made by their own stores.
 public enum RemoteKey {
+    #if canImport(Security)
     /// A fresh P-256 private key, never stored anywhere.
     public static func generate() -> SecKey? {
         let attrs: [String: Any] = [kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
@@ -183,6 +235,33 @@ public enum RemoteKey {
         guard let d = SecKeyCopyExternalRepresentation(pub, nil) as Data?, d.count == 65 else { return nil }
         return d
     }
+    #else
+    /// A fresh P-256 private key, never stored anywhere (Linux).
+    public static func generate() -> P256.Signing.PrivateKey {
+        P256.Signing.PrivateKey()
+    }
+
+    /// The private key as X9.63 (04 ‖ X ‖ Y ‖ D, 97 bytes), for a TEST ONLY file store (Linux).
+    public static func export(_ key: P256.Signing.PrivateKey) -> Data {
+        key.x963Representation
+    }
+
+    /// A private key back from `export` (Linux).
+    public static func importPrivate(_ data: Data) -> P256.Signing.PrivateKey? {
+        guard data.count == 97 else { return nil }
+        return try? P256.Signing.PrivateKey(x963Representation: data)
+    }
+
+    /// The public key's 65-byte X9.63 point (04 ‖ X ‖ Y) (Linux).
+    public static func publicPoint(_ key: P256.Signing.PrivateKey) -> Data {
+        key.publicKey.x963Representation
+    }
+
+    /// The public key's 65-byte X9.63 point (04 ‖ X ‖ Y) (Linux).
+    public static func publicPoint(_ key: P256.Signing.PublicKey) -> Data {
+        key.x963Representation
+    }
+    #endif
 }
 
 /// Just enough DER for one certificate and one SPKI.

@@ -1,6 +1,13 @@
+// Linux port (ledgehost): modified from the upstream v0.6.2 file — see Vendor/VENDORED.md.
 import Foundation
+#if canImport(Security)
 import Security
+#endif
+#if canImport(CryptoKit)
 import CryptoKit
+#else
+import Crypto
+#endif
 
 // Remote access payloads (kinds 18–22, docs/remote-access-plan.md §3.2), which pairing at home
 // uses too (docs/home-pairing-plan.md §3.1: no new kinds, only new string values and optional
@@ -76,6 +83,7 @@ public struct SignedMacInfo: Codable, Sendable {
         self.info = info; self.key = key; self.sig = sig
     }
 
+    #if canImport(Security)
     /// Signs `info` with the Mac's identity key (host side). Nil if the key cannot sign.
     public static func signing(_ info: MacInfo, with privateKey: SecKey) -> SignedMacInfo? {
         let bytes = Wire.encode(info)
@@ -84,6 +92,18 @@ public struct SignedMacInfo: Codable, Sendable {
         else { return nil }
         return SignedMacInfo(info: bytes.base64EncodedString(), key: point.base64EncodedString(), sig: sig.base64EncodedString())
     }
+    #else
+    /// Signs `info` with the host's identity key (Linux, swift-crypto).
+    /// Same wire result as the SecKey path: ECDSA P-256/SHA-256 over the
+    /// exact JSON bytes, signature in DER form.
+    public static func signing(_ info: MacInfo, with privateKey: P256.Signing.PrivateKey) -> SignedMacInfo? {
+        let bytes = Wire.encode(info)
+        guard !bytes.isEmpty, let signature = try? privateKey.signature(for: bytes) else { return nil }
+        return SignedMacInfo(info: bytes.base64EncodedString(),
+                             key: privateKey.publicKey.x963Representation.base64EncodedString(),
+                             sig: signature.derRepresentation.base64EncodedString())
+    }
+    #endif
 
     /// The MacInfo and the fingerprint of the key that signed it, when the signature verifies over
     /// the exact `info` bytes, the key is a P-256 point, the JSON decodes and its `macID` is that
