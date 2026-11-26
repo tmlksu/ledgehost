@@ -211,3 +211,27 @@ second machine on the same LAN resolves the host name correctly
 to the real address, and the host itself owns no such address, so
 the stale record lived on the client side. If it recurs, deleting
 and re-adding the host entry on the client is the first remedy.
+
+## Progress — 0-A encode and capture measurements (2026-11-26)
+
+Installed for the tests: gstreamer1.0-tools, -plugins-base,
+-plugins-good, -plugins-bad (the `va` plugin).
+
+Encode (target resolution 2266x1488, vah265lpenc, 12 Mbps target):
+- Output is HEVC Main, 2266x1488, ~9.6 Mbps actual. Speed with a
+  cheap source is ~90 fps; with a heavy software-rendered source
+  the source, not the encoder, is the bottleneck.
+- Both VA encoders label pictures "B" even with b-frames=0, but
+  packet pts-dts is 0 throughout and pts is monotonic in decode
+  order: these are low-delay B pictures with zero reordering
+  delay, which is what the no-B-frames criterion exists to ensure.
+
+Capture (ximagesrc, on the remote-desktop dummy display):
+- 1600x1200 and 2266x1488 both deliver 25 fps (that display's own
+  refresh ceiling) with negligible CPU (~3% of one core) and the
+  full-rate data path (~340 MB/s at target resolution) sustained.
+- The seat display was not reachable from SSH (different X
+  authority), so capture on the real local session is still open;
+  it belongs with the first streaming slice in Phase 1.
+
+Still open in 0-A: playing a test encode on the iPad itself.
