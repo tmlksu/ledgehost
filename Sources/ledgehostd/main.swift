@@ -337,6 +337,9 @@ final class ConnectionHandler: ChannelInboundHandler {
             tick = context.eventLoop.scheduleRepeatedTask(initialDelay: .seconds(10), delay: .seconds(10)) { [weak self] _ in
                 guard let self, self.state == .session else { return }
                 self.send(context: context, kind: .tick, payload: Data())
+                // Poll the water mark too — writabilityChanged alone is
+                // transition-driven; a stalled reader must be caught.
+                self.updateDropping()
             }
 
         case .session:

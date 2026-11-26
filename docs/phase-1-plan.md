@@ -541,3 +541,36 @@ injection is solid and held-state release is proven).
   each event vs discrete modifier keys), pointer drawn from the
   single static kind 14, scrollGesture vs .scroll usage, and
   event rate vs the 240/s cap.
+- 2026-11-27: P1-M4 join & recovery verified on the scratch
+  daemon (:21, port 17460) with the probe's extended record
+  mode (per-second ClientStats, frameAge measurement, --stall
+  flag). Measured:
+  • Rejoin time: selectSource -> first frame = 330 ms, 224 ms,
+    199 ms across runs — under the ~1 s target (first bytes are
+    cached kind 0 + the forced IDR).
+  • Second-client join while streaming: the joining session
+    received the cached kind 0 twice and its first frame was a
+    forced IDR (508,782 B) — "session ... resumed on IDR".
+  • Drop policy under a stalled reader: probe pauses autoRead;
+    at ~1-3 Mbps the channel stays writable through ~10-13 MB
+    of socket+channel absorption, so engagement needs ~35-50 s
+    of stall at idle-desktop bitrates. Logged sequence:
+    "over the water mark — dropping AUs, forcing IDR" ->
+    "writable again — rejoin on next IDR" -> "resumed on IDR
+    (611 AUs dropped)". updateDropping is now also polled from
+    the 10 s tick as a backstop to the writabilityChanged event.
+  • 10-min soak: 32,684 frames recorded, zero water-mark
+    events; encoder-side "60 au/s" steady throughout
+    (ClientStats logged every second). Probe-observed average
+    ~54.5 delivered fps — below the nominal 60 the encoder
+    sustained; the join/stall tests churned the same session
+    and the probe writes files synchronously on its event loop.
+    Re-measure cleanly at acceptance.
+  • Latency budget vs plan: capture -> AU-out p50 15.9 ms,
+    p95 18.8 ms (target <= 20 ms) PASS; frameAge p50 9 ms,
+    max 178 ms incl. stall backlog (target p50 <= 50 ms) PASS;
+    fps >= 58: encoder 60 au/s yes, probe-delivered avg 54.5 —
+    flagged for clean re-measurement.
+  • Clock: timedatectl reports "System clock synchronized:
+    yes, NTP active" — the earlier frameAge=0 ms on the iPad
+    remains a device-clock offset (host runs ahead), not drift.

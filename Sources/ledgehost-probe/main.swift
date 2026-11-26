@@ -40,6 +40,7 @@ struct Args {
     var seconds: Double = 10
     var out: String = "recording"
     var script: String = ""
+    var stall: Double = 0
 }
 
 func parseArgs() -> Args {
@@ -54,6 +55,7 @@ func parseArgs() -> Args {
         case "--seconds": args.seconds = Double(it.next() ?? "") ?? args.seconds
         case "--out": args.out = it.next() ?? args.out
         case "--script": args.script = it.next() ?? args.script
+        case "--stall": args.stall = Double(it.next() ?? "") ?? args.stall
         default: break
         }
     }
@@ -143,7 +145,7 @@ func makeClientContext(alpn: String, hostBox: HostBox) throws -> NIOSSLContext {
 
 final class Collector: ChannelInboundHandler {
     typealias InboundIn = ByteBuffer
-    var onMessage: ((StreamMessageKind, Data) -> Void)?
+    var onMessage: ((StreamMessageKind, Data, Double) -> Void)?
     var onClose: (() -> Void)?
     private var buffer = Data()
 
@@ -156,7 +158,7 @@ final class Collector: ChannelInboundHandler {
             let payload = buffer.subdata(in: buffer.startIndex + StreamMessage.headerLength
                                          ..< buffer.startIndex + StreamMessage.headerLength + header.payloadLength)
             buffer.removeSubrange(buffer.startIndex..<buffer.startIndex + StreamMessage.headerLength + header.payloadLength)
-            onMessage?(header.kind, payload)
+            onMessage?(header.kind, payload, header.timestamp)
         }
     }
 
@@ -227,7 +229,7 @@ if args.mode == "pair" {
     let collector = Collector()
     var result: PairResult?
     var closed = false
-    collector.onMessage = { kind, payload in
+    collector.onMessage = { kind, payload, _ts in
         if kind == .pairResult { result = Wire.decode(PairResult.self, from: payload) }
     }
     collector.onClose = { closed = true }
@@ -285,7 +287,10 @@ if args.mode == "pair" {
     var frameIndex = 0
     var listSeen = false
     var firstFrame = false
-    collector.onMessage = { kind, payload in
+    var firstFrameAt: Date?
+    var selectSentAt = Date.distantPast
+    var frameAges: [Double] = []
+    collector.onMessage = { kind, payload, ts in
         switch kind {
         case .windowList:
             listSeen = true
@@ -308,8 +313,14 @@ if args.mode == "pair" {
             }
             for n in nals { try? streamOut.write(contentsOf: AnnexB.startCoded(n)) }
             let types = nals.map { ($0[$0.startIndex] >> 1) & 0x3f }
+            let age = Date().timeIntervalSince1970 * 1000 - ts * 1000
+            frameAges.append(age)
+            if firstFrameAt == nil {
+                firstFrameAt = Date()
+                print("probe: first frame \(Int(Date().timeIntervalSince(selectSentAt) * 1000)) ms after selectSource")
+            }
             try? metaOut.write(contentsOf: Data(
-                "{\"k\":1,\"i\":\(c),\"bytes\":\(payload.count),\"idr\":\(types.contains(19) || types.contains(20))}\n".utf8))
+                "{\"k\":1,\"i\":\(c),\"bytes\":\(payload.count),\"idr\":\(types.contains(19) || types.contains(20)),\"age\":\(Int(age))}\n".utf8))
             firstFrame = true
         default: break
         }
@@ -326,8 +337,39 @@ if args.mode == "pair" {
     guard waitFor(5, until: { listSeen }) else {
         fputs("probe: no window list received\n", stderr); exit(1)
     }
+    selectSentAt = Date()
     send(channel, kind: .selectSource, payload: Wire.encode(StreamSource.desktop))
-    _ = waitFor(args.seconds + 5, until: { false })
+    // per-second ClientStats like a real client (P1-M4 soak)
+    channel.eventLoop.scheduleRepeatedTask(initialDelay: .seconds(1), delay: .seconds(1)) { _ in
+        send(channel, kind: .clientStats, payload: Wire.encode(
+            ClientStats(fps: frameIndex, frameAgeMs: Int(frameAges.last ?? -1), rttMs: 0, device: "ledgehost-probe")))
+    }
+    if args.stall > 0 {
+        // P1-M4 drop-policy probe: wait for ~30 frames, then stop
+        // reading until the high-water policy kicks in, then resume.
+        channel.eventLoop.execute { [channel] in
+            var waited = 0
+            func poll() {
+                if frameIndex >= 30 || waited > 40 {
+                    print("probe: stalling reads for \(args.stall) s (at frame \(frameIndex))")
+                    _ = channel.setOption(ChannelOptions.autoRead, value: false)
+                    channel.eventLoop.scheduleTask(in: .seconds(Int64(args.stall))) {
+                        _ = channel.setOption(ChannelOptions.autoRead, value: true)
+                        print("probe: resumed reads")
+                    }
+                    return
+                }
+                waited += 1
+                channel.eventLoop.scheduleTask(in: .milliseconds(250)) { poll() }
+            }
+            poll()
+        }
+    }
+    _ = waitFor(args.seconds + args.stall + 8, until: { false })
+    if !frameAges.isEmpty {
+        let sorted = frameAges.sorted()
+        print("probe: frameAge p50 \(Int(sorted[sorted.count / 2])) ms max \(Int(sorted.last ?? -1)) ms; frames \(frameIndex) (~\(Int(Double(frameIndex) / args.seconds)) fps)")
+    }
     try? channel.close().wait()
     try? streamOut.close()
     try? metaOut.close()
@@ -347,7 +389,7 @@ if args.mode == "pair" {
     let collector = Collector()
     var listSeen = false
     var gotSets = false, gotFrame = false
-    collector.onMessage = { kind, _ in
+    collector.onMessage = { kind, _, _ts in
         if kind == .windowList { listSeen = true }
         if kind == .parameterSets { gotSets = true }
         if kind == .frame { gotFrame = true }
@@ -411,7 +453,7 @@ if args.mode == "pair" {
     var settingsOK = false
     var macInfoOK = false
     var pong = false
-    collector.onMessage = { kind, payload in
+    collector.onMessage = { kind, payload, _ts in
         kinds.append(kind)
         switch kind {
         case .windowList: list = Wire.decode(WindowList.self, from: payload)
