@@ -61,6 +61,9 @@ final class InputService {
         var env: [String: String] = ["DISPLAY": display, "PATH": "/usr/bin:/bin",
                                      "HOME": NSHomeDirectory()]
         if let xauthority { env["XAUTHORITY"] = xauthority }
+        if ProcessInfo.processInfo.environment["LH_CLIP_DEBUG"] != nil {
+            env["LH_CLIP_DEBUG"] = "1"
+        }
         p.environment = env
         let inPipe = Pipe(), outPipe = Pipe(), errPipe = Pipe()
         p.standardInput = inPipe

@@ -132,6 +132,8 @@ static void hold_btn(int b, int down)
     XTestFakeButtonEvent(dpy, b, down ? True : False, CurrentTime);
 }
 
+static void scratch_reset(void);  /* defined below */
+
 static void release_all(void)
 {
     for (int kc = 0; kc < 256; kc++)
@@ -144,26 +146,33 @@ static void release_all(void)
             held_btn[b] = 0;
             XTestFakeButtonEvent(dpy, b, False, CurrentTime);
         }
+    scratch_reset();
     scroll_acc_x = scroll_acc_y = 0;
     XFlush(dpy);
 }
 
 /* MARK: scratch keycode (decision 8: reset at startup and exit) */
 
-static void scratch_reset(void)
+static int scratch_live;                /* scratch_kc holds a keysym */
+
+static void scratch_reset_force(int force)
 {
-    if (scratch_kc) {
+    if (scratch_kc && (scratch_live || force)) {
         KeySym none = NoSymbol;
         XChangeKeyboardMapping(dpy, scratch_kc, 1, &none, 1);
         XSync(dpy, False);
+        scratch_live = 0;
     }
 }
+
+static void scratch_reset(void) { scratch_reset_force(0); }
 
 static void scratch_set(KeySym sym)
 {
     KeySym syms[1] = { sym };
     XChangeKeyboardMapping(dpy, scratch_kc, 1, syms, 1);
     XSync(dpy, False);      /* the keymap must be live before we press */
+    scratch_live = 1;
 }
 
 /* MARK: text typing
@@ -196,6 +205,8 @@ static int utf8_at(const unsigned char *s, int n, unsigned int *cp)
 }
 
 static int shift_kc = -1;
+static double last_type_ms;             /* last char press of any kind */
+static double last_scratch_ms;          /* pacing for scratch remaps */
 
 static void type_char(unsigned int cp)
 {
@@ -214,6 +225,7 @@ static void type_char(unsigned int cp)
                 }
         XFree(map);
     }
+    last_type_ms = now_sec();
     if (found_kc) {
         int need_shift = (level == 1);
         if (need_shift && shift_kc > 0)
@@ -223,11 +235,27 @@ static void type_char(unsigned int cp)
         if (need_shift && shift_kc > 0)
             XTestFakeKeyEvent(dpy, shift_kc, False, CurrentTime);
     } else {
-        /* absent from the layout: remap the scratch keycode briefly */
+        /* absent from the layout: remap the scratch keycode and press.
+         * The mapping STAYS until the next remap or reset: clients
+         * translate keycode -> keysym with their own keymap cache,
+         * which updates on the MappingNotify preceding this KeyPress.
+         * Restoring immediately races that lookup and the press
+         * resolves to NoSymbol (or the next char's keysym). */
+        /* the consumer must absorb both the press before us and our
+         * remap before it looks up this keycode */
+        double t = now_sec();
+        double since = last_scratch_ms > last_type_ms
+                     ? t - last_scratch_ms : t - last_type_ms;
+        double gap = since;
+        if (gap < 0.030) {
+            struct timespec ts;
+            ts.tv_sec = 0; ts.tv_nsec = (long)((0.030 - gap) * 1e9);
+            nanosleep(&ts, NULL);
+        }
         scratch_set(sym);
+        last_scratch_ms = last_type_ms = now_sec();
         XTestFakeKeyEvent(dpy, scratch_kc, True, CurrentTime);
         XTestFakeKeyEvent(dpy, scratch_kc, False, CurrentTime);
-        scratch_reset();
     }
     XFlush(dpy);
 }
@@ -306,7 +334,8 @@ static void op_text(const unsigned char *p, int n)
  * helper itself placed: an owner move to our own window, or foreign
  * content identical to it, is never reported. */
 
-static Atom a_clip, a_utf8, a_targets, a_text_utf8, a_prop;
+static Atom a_clip, a_utf8, a_targets, a_text_utf8, a_text_plain,
+    a_text, a_timestamp, a_prop;
 static Window clip_win;
 static unsigned char *set_text;         /* device text we own, or NULL */
 static long set_len;
@@ -314,6 +343,21 @@ static Window clip_owner;               /* last seen CLIPBOARD owner */
 static int xfixes_ev_base = -1;
 static int conv_pending;                /* a conversion request is out */
 static int conv_recheck;                /* owner moved while converting */
+static double conv_retry_at;            /* armed re-fetch timer, or 0 */
+static int conv_retries;                /* retries spent on this owner */
+static int clip_dbg = -1;               /* LH_CLIP_DEBUG: verbose decisions */
+
+#define cdbg(...) do { if (clip_dbg) {         fprintf(stderr, "input: clipdbg: " __VA_ARGS__);         fputc('\n', stderr); } } while (0)
+
+static const char *atom_name(Atom a)
+{
+    static char buf[64];
+    if (!a) return "None";
+    char *n = XGetAtomName(dpy, a);
+    snprintf(buf, sizeof buf, "%s", n ? n : "?");
+    if (n) XFree(n);
+    return buf;
+}
 
 #define CLIP_MAX (256 * 1024)
 
@@ -330,6 +374,8 @@ static void emit_record(int op, const unsigned char *data, int n)
 
 static void serve_selection(XSelectionRequestEvent *req)
 {
+    cdbg("serve req: target=%s prop=%s set_len=%ld",
+         atom_name(req->target), atom_name(req->property), set_len);
     XSelectionEvent ev = { 0 };
     ev.type = SelectionNotify;
     ev.display = req->display;
@@ -338,18 +384,29 @@ static void serve_selection(XSelectionRequestEvent *req)
     ev.target = req->target;
     ev.time = req->time;
     ev.property = None;
+    /* obsolete requestors pass property None: the target names it */
+    Atom prop = req->property == None ? req->target : req->property;
     if (req->target == a_targets) {
-        Atom list[4] = { a_targets, a_utf8, a_text_utf8, XA_STRING };
-        XChangeProperty(dpy, req->requestor, req->property, XA_ATOM, 32,
-                        PropModeReplace, (unsigned char *)list, 4);
-        ev.property = req->property;
+        Atom list[7] = { a_targets, a_timestamp, a_utf8, a_text_utf8,
+                         a_text_plain, a_text, XA_STRING };
+        XChangeProperty(dpy, req->requestor, prop, XA_ATOM, 32,
+                        PropModeReplace, (unsigned char *)list, 7);
+        ev.property = prop;
+    } else if (req->target == a_timestamp) {
+        Time t = 0;
+        XChangeProperty(dpy, req->requestor, prop, XA_INTEGER, 32,
+                        PropModeReplace, (unsigned char *)&t, 1);
+        ev.property = prop;
     } else if (set_text &&
                (req->target == a_utf8 || req->target == a_text_utf8 ||
+                req->target == a_text_plain || req->target == a_text ||
                 req->target == XA_STRING)) {
-        XChangeProperty(dpy, req->requestor, req->property, req->target, 8,
+        XChangeProperty(dpy, req->requestor, prop, req->target, 8,
                         PropModeReplace, set_text, (int)set_len);
-        ev.property = req->property;
+        ev.property = prop;
     }
+    cdbg("serve resp: target=%s -> prop=%s",
+         atom_name(req->target), atom_name(ev.property));
     XSendEvent(dpy, req->requestor, False, 0, (XEvent *)&ev);
 }
 
@@ -357,6 +414,8 @@ static void fetch_clipboard_text(void)
 {
     if (conv_pending) { conv_recheck = 1; return; }
     conv_pending = 1;
+    cdbg("fetch: asking owner %lu for %s", (unsigned long)clip_owner,
+         atom_name(a_utf8));
     XConvertSelection(dpy, a_clip, a_utf8, a_prop, clip_win, CurrentTime);
     XFlush(dpy);
 }
@@ -366,6 +425,8 @@ static void fetch_clipboard_text(void)
 static void owner_moved(Window owner)
 {
     clip_owner = owner;
+    conv_retries = 0;
+    conv_retry_at = 0;
     if (owner == clip_win || owner == None) return;
     fetch_clipboard_text();
 }
@@ -373,18 +434,39 @@ static void owner_moved(Window owner)
 static void got_selection_text(XSelectionEvent *sel)
 {
     conv_pending = 0;
+    if (sel->property == None || sel->target != a_utf8) {
+        /* the owner refused this target or answered oddly — one
+         * retry covers "owner mid-change" timing */
+        if (conv_retries++ < 1) {
+            conv_retry_at = now_sec() + 0.15;
+            cdbg("fetch: refused/odd reply (prop=%s target=%s) — retry in 150ms",
+                 atom_name(sel->property), atom_name(sel->target));
+        } else
+            cdbg("fetch: refused (prop=%s target=%s) — giving up",
+                 atom_name(sel->property), atom_name(sel->target));
+    }
     if (sel->property != None) {
         Atom type; int fmt; unsigned long n, after; unsigned char *data = NULL;
         if (XGetWindowProperty(dpy, clip_win, sel->property, 0,
                                CLIP_MAX / 4 + 1, True, AnyPropertyType,
                                &type, &fmt, &n, &after, &data) == Success
             && data) {
-            if (after == 0 && fmt == 8 && n > 0 && n <= CLIP_MAX) {
+            if (fmt != 8 || (after == 0 && n == 0)) {
+                /* empty/odd reply — same retry as a refusal */
+                if (conv_retries++ < 1) {
+                    conv_retry_at = now_sec() + 0.15;
+                    cdbg("fetch: empty/odd reply (fmt=%d n=%lu) — retry in 150ms",
+                         fmt, n);
+                } else
+                    cdbg("fetch: empty/odd reply (fmt=%d n=%lu) — giving up", fmt, n);
+            } else if (after == 0 && n > 0 && n <= CLIP_MAX) {
                 if (!(set_text && n == (unsigned long)set_len &&
-                      memcmp(data, set_text, n) == 0))
+                      memcmp(data, set_text, n) == 0)) {
+                    cdbg("fetch: got %lu byte(s) of %s — reporting", n,
+                         atom_name(type));
                     emit_record(1, data, (int)n);
-                else
-                    logf("clipboard: %lu byte(s) match device text — not reported", n);
+                } else
+                    cdbg("fetch: %lu byte(s) match device text — suppressed", n);
             } else if (after > 0)
                 logf("clipboard: dropped (over %d bytes)", CLIP_MAX);
             XFree(data);
@@ -401,6 +483,8 @@ static void drain_x_events(void)
         XNextEvent(dpy, &ev);
         if (xfixes_ev_base >= 0 && ev.type == xfixes_ev_base + XFixesSelectionNotify) {
             XFixesSelectionNotifyEvent *se = (XFixesSelectionNotifyEvent *)&ev;
+            cdbg("xfixes event: owner=%lu subtype=%d",
+                 (unsigned long)se->owner, se->subtype);
             /* subtype 0 (owner set) names the new owner; subtype 1
              * (owner's window destroyed) can hand ownership to a
              * clipboard manager — ask the server for the truth. */
@@ -424,9 +508,13 @@ static void clipboard_init(void)
     a_utf8 = XInternAtom(dpy, "UTF8_STRING", False);
     a_targets = XInternAtom(dpy, "TARGETS", False);
     a_text_utf8 = XInternAtom(dpy, "text/plain;charset=utf-8", False);
+    a_timestamp = XInternAtom(dpy, "TIMESTAMP", False);
+    a_text_plain = XInternAtom(dpy, "text/plain", False);
+    a_text = XInternAtom(dpy, "TEXT", False);
     a_prop = XInternAtom(dpy, "LEDGEHOST_CLIPBOARD", False);
     clip_win = XCreateSimpleWindow(dpy, DefaultRootWindow(dpy), 0, 0, 1, 1,
                                  0, 0, 0);
+    clip_dbg = getenv("LH_CLIP_DEBUG") != NULL;
     /* SelectionNotify/SelectionRequest need no mask on our own window;
      * mask SelectionClear so we notice losing ownership too. */
     XSelectInput(dpy, clip_win, PropertyChangeMask);
@@ -491,7 +579,7 @@ int main(void)
     XDisplayKeycodes(dpy, &min_kc, &max_kc);
     scratch_kc = max_kc;                  /* last keycode, normally spare */
     shift_kc = XKeysymToKeycode(dpy, XStringToKeysym("Shift_L"));
-    scratch_reset();                      /* never inherit a stale remap */
+    scratch_reset_force(1);               /* never inherit a stale remap */
     source_rect();
     clipboard_init();
     logf("up: keycodes %d..%d scratch %d shift %d", min_kc, max_kc, scratch_kc, shift_kc);
@@ -509,11 +597,15 @@ int main(void)
             double t = now_sec();
             if (t >= poll_next) { clipboard_poll(); poll_next = t + 0.5; }
         }
+        if (conv_retry_at && now_sec() >= conv_retry_at) {
+            conv_retry_at = 0;
+            fetch_clipboard_text();
+        }
         fd_set rfds;
         FD_ZERO(&rfds); FD_SET(0, &rfds); FD_SET(xfd, &rfds);
-        struct timeval tv = { 0, 500000 };
+        struct timeval tv = { 0, conv_retry_at ? 100000 : 500000 };
         int s = select(xfd + 1, &rfds, NULL, NULL,
-                       xfixes_ev_base < 0 ? &tv : NULL);
+                       (xfixes_ev_base < 0 || conv_retry_at) ? &tv : NULL);
         if (s < 0) { if (errno == EINTR) continue; break; }
         if (s == 0 || !FD_ISSET(0, &rfds)) continue;
         ssize_t r = read(0, buf + have, sizeof buf - have);
@@ -554,7 +646,7 @@ int main(void)
     }
     if (pending_move_n) op_pointer(pending_move, 9);
     release_all();
-    scratch_reset();
+    scratch_reset_force(1);
     logf("exit");
     return 0;
 }

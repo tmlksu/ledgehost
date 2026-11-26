@@ -688,3 +688,39 @@ injection is solid and held-state release is proven).
   documents install/linger/display-change/commands/
   upgrade/uninstall and the CRD display-renumber caveat.
   Real-service cutover is the orchestrator's step.
+- 2026-11-27 (acceptance fixes): two real-client failures
+  reproduced and fixed with real GTK apps on :21 (Mousepad,
+  xfce4-terminal — driven via a scratch daemon + the
+  helper's record protocol; script scripts/real-app-
+  roundtrip.sh re-runs the whole check).
+  ISSUE 1 (Japanese .text never reached apps): root cause =
+  keymap-cache race on the scratch-keycode path. With the
+  immediate restore after each fake press, consumers looked
+  keycode 255 up as NoSymbol (all CJK dropped — verified
+  per-char "X日Y" -> "XY"); with instant successive remaps,
+  presses resolved to LATER remapped keysyms (batch/lazy
+  keymap refetch — "日本語テストー。" -> "本スー。。。。。").
+  Fix: keep the scratch mapping until the next remap
+  (lazy reset; force-reset at startup/exit/release) AND pace
+  remaps: >=30 ms between any press and the next scratch
+  remap (measured: >=15 ms suffices, 8 ms fails). Result:
+  "Hello日本語テストー。z漢字" round-trips exactly, both as
+  one .text record and per-char events; ASCII unaffected.
+  ISSUE 2 (clipboard vs real apps): Mousepad and
+  xfce4-terminal both interop correctly (copies reported,
+  full Japanese strings pasted). Found and fixed: (a)
+  obsolete requestors that send property=None were refused
+  — now the target names the property per ICCCM (xquery
+  clip-legacy verifies); (b) TARGETS now advertises and
+  serves TIMESTAMP, text/plain and TEXT aliases too; (c)
+  a refused/empty conversion reply now retries once after
+  150 ms (owner mid-change); (d) debug channel: LH_CLIP_DEBUG
+  (forwarded by the daemon) logs fetch/serve decisions —
+  atom names + sizes, never content. Echo suppression and
+  repeated foreign copies verified. The "only 1 character"
+  symptom was NOT reproducible against real apps — likely
+  the typing issue (non-ASCII chars dropped leaving a lone
+  ASCII char) or a re-copy of device-set text correctly
+  suppressed; the new clipdbg channel will identify it if it
+  recurs. xquery gained activate/focus/clip wait/clip-legacy;
+  scripts/helper-driver.py drives helper records directly.

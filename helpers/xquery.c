@@ -8,11 +8,15 @@
  *                            refusal/empty selection)
  *   xquery clip set TEXT [S] owns CLIPBOARD and serves TEXT to
  *                            requestors for S seconds (default 15)
+ *   xquery activate NAME    raise + input-focus the first toplevel
+ *                           whose WM_NAME contains NAME
+ *   xquery focus            print the input-focus window's name
  */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <ctype.h>
 #include <X11/Xlib.h>
 #include <X11/Xatom.h>
 
@@ -59,12 +63,12 @@ static void serve(XSelectionRequestEvent *req, const char *text, long n)
     XFlush(d);
 }
 
-static int clip_get(Window win)
+static int clip_get2(Window win, Atom prop)
 {
     if (XGetSelectionOwner(d, a_clip) == None) {
         puts("clip: no owner"); return 1;
     }
-    XConvertSelection(d, a_clip, a_utf8, a_prop, win, CurrentTime);
+    XConvertSelection(d, a_clip, a_utf8, prop, win, CurrentTime);
     XFlush(d);
     double deadline = now_sec() + 5;
     while (now_sec() < deadline) {
@@ -75,7 +79,7 @@ static int clip_get(Window win)
                 puts("clip: conversion refused"); return 1;
             }
             Atom type; int fmt; unsigned long n, after; unsigned char *data = NULL;
-            if (XGetWindowProperty(d, win, a_prop, 0, 1 << 20, True,
+            if (XGetWindowProperty(d, win, ev.xselection.property, 0, 1 << 20, True,
                                    AnyPropertyType, &type, &fmt, &n,
                                    &after, &data) != Success || !data) {
                 puts("clip: property read failed"); return 1;
@@ -88,6 +92,70 @@ static int clip_get(Window win)
         nanosleep(&ts, NULL);
     }
     puts("clip: timed out"); return 1;
+}
+
+static char *win_name(Window w)
+{
+    static char buf[256];
+    Atom type; int fmt; unsigned long n, after; unsigned char *data = NULL;
+    Atom wmn = XInternAtom(d, "WM_NAME", False);
+    buf[0] = 0;
+    if (XGetWindowProperty(d, w, wmn, 0, 255, False, AnyPropertyType,
+                           &type, &fmt, &n, &after, &data) == Success && data) {
+        snprintf(buf, sizeof buf, "%.*s", (int)(n < 255 ? n : 255), data);
+        XFree(data);
+    }
+    return buf;
+}
+
+static int activate(Window root, const char *name)
+{
+    Atom cl = XInternAtom(d, "_NET_CLIENT_LIST", False);
+    Atom type; int fmt; unsigned long n, after; unsigned char *data = NULL;
+    if (XGetWindowProperty(d, root, cl, 0, 1024, False, XA_WINDOW,
+                           &type, &fmt, &n, &after, &data) != Success || !data)
+        { fputs("xquery: no _NET_CLIENT_LIST\n", stderr); return 1; }
+    Window *list = (Window *)data;
+    Window found = None;
+    for (unsigned long i = 0; i < n; i++) {
+        char lowname[256], lowneedle[256];
+        snprintf(lowname, sizeof lowname, "%s", win_name(list[i]));
+        snprintf(lowneedle, sizeof lowneedle, "%s", name);
+        for (char *c = lowname; *c; c++) *c = tolower((unsigned char)*c);
+        for (char *c = lowneedle; *c; c++) *c = tolower((unsigned char)*c);
+        if (strstr(lowname, lowneedle)) { found = list[i]; break; }
+    }
+    XFree(data);
+    if (!found) { fprintf(stderr, "xquery: no window matching %s\n", name); return 1; }
+    XRaiseWindow(d, found);
+    XSetInputFocus(d, found, RevertToParent, CurrentTime);
+    XFlush(d);
+    printf("activated 0x%lx %s\n", (unsigned long)found, win_name(found));
+    return 0;
+}
+
+static int focus_name(Window root)
+{
+    Window f = None; int rev = 0;
+    XGetInputFocus(d, &f, &rev);
+    if (f == None || f == PointerRoot) { puts("focus: none"); return 1; }
+    printf("focus 0x%lx %s\n", (unsigned long)f, win_name(f));
+    return 0;
+}
+
+static int clip_get(Window win) { return clip_get2(win, a_prop); }
+
+static int clip_wait(Window win, double secs)
+{
+    /* poll until CLIPBOARD has an owner, then fetch like clip get */
+    double until = now_sec() + secs;
+    while (now_sec() < until) {
+        if (XGetSelectionOwner(d, a_clip) != None)
+            return clip_get(win);
+        struct timespec ts = { 0, 100 * 1000 * 1000 };
+        nanosleep(&ts, NULL);
+    }
+    puts("clip: no owner before timeout"); return 1;
 }
 
 static int clip_set(Window win, const char *text, double secs)
@@ -119,10 +187,27 @@ int main(int argc, char **argv)
     atoms();
     Window win = XCreateSimpleWindow(d, root, 0, 0, 1, 1, 0, 0, 0);
 
+    if (argc >= 3 && !strcmp(argv[1], "clip-legacy")) {
+        /* obsolete convention: SelectionRequest with property None;
+         * we must pass the TARGET as the property ourselves */
+        int rc;
+        if (!strcmp(argv[2], "get"))
+            rc = clip_get2(win, None);
+        else { fputs("usage: xquery clip-legacy get\n", stderr); return 64; }
+        XDestroyWindow(d, win);
+        XCloseDisplay(d);
+        return rc;
+    }
+    if (argc >= 3 && !strcmp(argv[1], "activate"))
+        { int rc = activate(root, argv[2]); XCloseDisplay(d); return rc; }
+    if (argc >= 2 && !strcmp(argv[1], "focus"))
+        { int rc = focus_name(root); XCloseDisplay(d); return rc; }
     if (argc >= 3 && !strcmp(argv[1], "clip")) {
         int rc;
         if (!strcmp(argv[2], "get"))
             rc = clip_get(win);
+        else if (!strcmp(argv[2], "wait"))
+            rc = clip_wait(win, argc >= 4 ? atof(argv[3]) : 15);
         else if (!strcmp(argv[2], "set") && argc >= 4)
             rc = clip_set(win, argv[3], argc >= 5 ? atof(argv[4]) : 15);
         else {
