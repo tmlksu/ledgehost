@@ -245,3 +245,11 @@ TCP connection at 21:52:50, with client telemetry still flowing:
 the 10-minute idle criterion is now proven, not inferred. The
 client also shows a consistent pattern of one short-lived session
 immediately replaced by the real one at connect time.
+
+## Progress — test encode played on the iPad (2026-11-26)
+
+A 5-second vah265lpenc encode (2266x1488, HEVC Main, 12 Mbps,
+muxed to MP4) was served over HTTP and played back on the iPad
+Air in Safari with no error: the target machine's encoder output
+is accepted by the client's decoder stack. This closes the last
+open item of 0-A.
