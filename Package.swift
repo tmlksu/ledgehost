@@ -15,6 +15,8 @@ let package = Package(
     products: [
         .library(name: "StreamProtocol", targets: ["StreamProtocol"]),
         .executable(name: "tls-spike", targets: ["tls-spike"]),
+        .executable(name: "ledgehostd", targets: ["ledgehostd"]),
+        .executable(name: "ledgehost-probe", targets: ["ledgehost-probe"]),
     ],
     dependencies: [
         .package(url: "https://github.com/apple/swift-crypto.git", from: "3.5.0"),
@@ -47,6 +49,30 @@ let package = Package(
                 .product(name: "NIOTLS", package: "swift-nio"),
             ],
             path: "Sources/tls-spike"
+        ),
+        .executableTarget(
+            name: "ledgehostd",
+            dependencies: [
+                "StreamProtocol",
+                .product(name: "Crypto", package: "swift-crypto"),
+                .product(name: "NIO", package: "swift-nio"),
+                .product(name: "NIOCore", package: "swift-nio"),
+                .product(name: "NIOSSL", package: "swift-nio-ssl"),
+                .product(name: "NIOTLS", package: "swift-nio"),
+            ],
+            path: "Sources/ledgehostd"
+        ),
+        .executableTarget(
+            name: "ledgehost-probe",
+            dependencies: [
+                "StreamProtocol",
+                .product(name: "Crypto", package: "swift-crypto"),
+                .product(name: "NIO", package: "swift-nio"),
+                .product(name: "NIOCore", package: "swift-nio"),
+                .product(name: "NIOSSL", package: "swift-nio-ssl"),
+                .product(name: "NIOTLS", package: "swift-nio"),
+            ],
+            path: "Sources/ledgehost-probe"
         ),
         .testTarget(
             name: "StreamProtocolTests",
