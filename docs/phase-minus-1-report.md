@@ -272,5 +272,7 @@ reads out), audio (kind 43), menus (AT-SPI), clipboard polish.
 - `scripts/check-forbidden-strings.sh` must pass before every push;
   it assembles its patterns from fragments so it does not contain
   the literals it searches for.
-- This report and the scaffold were prepared locally; nothing has
-  been pushed yet at the time of writing.
+- This report, the README and the checker were pushed to the private
+  repository on 2026-11-26 (commit `caf40af`), authored with the
+  noreply address above; the forbidden-string check passed before
+  the push.
