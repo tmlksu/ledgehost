@@ -10,8 +10,13 @@
  *   3 key      HID usage(2, BE), down(1)
  *   4 text     UTF-8 bytes (record length bounds it; <= 4096 chars)
  *   5 release-all  6 reset (drop all state)
- * stdout is never written; all logging is stderr. Exits on stdin EOF,
- * releasing held input and restoring the scratch keycode first.
+ *   7 set clipboard  UTF-8 text (<= 256 KiB); the helper takes the
+ *              CLIPBOARD selection and serves it
+ * stdout carries the same framing in the helper -> daemon direction:
+ *   op 1 clipboard changed  UTF-8 text of a CLIPBOARD selection made
+ *              by another X client (never what the helper itself set)
+ * All logging is stderr; clipboard content is never logged. Exits on
+ * stdin EOF, releasing held input and restoring the scratch keycode.
  */
 
 #define _GNU_SOURCE
@@ -29,6 +34,8 @@
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
 #include <X11/XKBlib.h>
+#include <X11/Xatom.h>
+#include <sys/select.h>
 
 /* The devprefix carries XTest.h but not its XInput.h prerequisite, and
  * no Xrandr.h at all: declare the small ABI surface we use (libXtst.so.6
@@ -40,6 +47,27 @@ extern int XTestFakeKeyEvent(Display *, unsigned int, int, unsigned long);
 extern int XTestFakeButtonEvent(Display *, unsigned int, int, unsigned long);
 #define Button6 6
 #define Button7 7
+
+/* XFixes 4.0 selection-owner-change notify, ABI declared directly
+ * (libXfixes.so.3 is linked by soname; no header in the devprefix). */
+extern int XFixesQueryExtension(Display *, int *, int *);
+extern void XFixesSelectSelectionInput(Display *, Window, Atom, unsigned long);
+#define XFixesSelectionNotify 0
+#define XFixesSetSelectionOwnerNotifyMask (1L << 0)
+#define XFixesSelectionWindowDestroyNotifyMask (1L << 1)
+#define XFixesSelectionClientCloseNotifyMask (1L << 2)
+typedef struct {
+    int type;
+    unsigned long serial;
+    int send_event;
+    Display *display;
+    Window window;
+    int subtype;
+    Window owner;
+    Atom selection;
+    Time timestamp;
+    Time selection_timestamp;
+} XFixesSelectionNotifyEvent;
 
 #include "generated/keymap.h"
 
@@ -270,6 +298,172 @@ static void op_text(const unsigned char *p, int n)
     }
 }
 
+/* MARK: clipboard (kind 32's X side)
+ * The helper owns a hidden window to hold the CLIPBOARD selection for
+ * device-supplied text, serves SelectionRequest out of it, and watches
+ * other clients' copies via XFixes owner-change events (or a 0.5 s
+ * owner+content poll when XFixes is absent). set_text tracks what the
+ * helper itself placed: an owner move to our own window, or foreign
+ * content identical to it, is never reported. */
+
+static Atom a_clip, a_utf8, a_targets, a_text_utf8, a_prop;
+static Window clip_win;
+static unsigned char *set_text;         /* device text we own, or NULL */
+static long set_len;
+static Window clip_owner;               /* last seen CLIPBOARD owner */
+static int xfixes_ev_base = -1;
+static int conv_pending;                /* a conversion request is out */
+static int conv_recheck;                /* owner moved while converting */
+
+#define CLIP_MAX (256 * 1024)
+
+static void emit_record(int op, const unsigned char *data, int n)
+{
+    /* helper -> daemon, same framing as stdin: len(4, BE) + op + fields */
+    unsigned char hdr[5];
+    uint32_t len = (uint32_t)n + 1;
+    hdr[0] = len >> 24; hdr[1] = len >> 16; hdr[2] = len >> 8; hdr[3] = len;
+    hdr[4] = (unsigned char)op;
+    (void)!write(1, hdr, 5);
+    if (n > 0) (void)!write(1, data, n);
+}
+
+static void serve_selection(XSelectionRequestEvent *req)
+{
+    XSelectionEvent ev = { 0 };
+    ev.type = SelectionNotify;
+    ev.display = req->display;
+    ev.requestor = req->requestor;
+    ev.selection = req->selection;
+    ev.target = req->target;
+    ev.time = req->time;
+    ev.property = None;
+    if (req->target == a_targets) {
+        Atom list[4] = { a_targets, a_utf8, a_text_utf8, XA_STRING };
+        XChangeProperty(dpy, req->requestor, req->property, XA_ATOM, 32,
+                        PropModeReplace, (unsigned char *)list, 4);
+        ev.property = req->property;
+    } else if (set_text &&
+               (req->target == a_utf8 || req->target == a_text_utf8 ||
+                req->target == XA_STRING)) {
+        XChangeProperty(dpy, req->requestor, req->property, req->target, 8,
+                        PropModeReplace, set_text, (int)set_len);
+        ev.property = req->property;
+    }
+    XSendEvent(dpy, req->requestor, False, 0, (XEvent *)&ev);
+}
+
+static void fetch_clipboard_text(void)
+{
+    if (conv_pending) { conv_recheck = 1; return; }
+    conv_pending = 1;
+    XConvertSelection(dpy, a_clip, a_utf8, a_prop, clip_win, CurrentTime);
+    XFlush(dpy);
+}
+
+/* The CLIPBOARD selection's owner moved (event or poll): our own window
+ * needs nothing done; another client is asked for its text. */
+static void owner_moved(Window owner)
+{
+    clip_owner = owner;
+    if (owner == clip_win || owner == None) return;
+    fetch_clipboard_text();
+}
+
+static void got_selection_text(XSelectionEvent *sel)
+{
+    conv_pending = 0;
+    if (sel->property != None) {
+        Atom type; int fmt; unsigned long n, after; unsigned char *data = NULL;
+        if (XGetWindowProperty(dpy, clip_win, sel->property, 0,
+                               CLIP_MAX / 4 + 1, True, AnyPropertyType,
+                               &type, &fmt, &n, &after, &data) == Success
+            && data) {
+            if (after == 0 && fmt == 8 && n > 0 && n <= CLIP_MAX) {
+                if (!(set_text && n == (unsigned long)set_len &&
+                      memcmp(data, set_text, n) == 0))
+                    emit_record(1, data, (int)n);
+                else
+                    logf("clipboard: %lu byte(s) match device text — not reported", n);
+            } else if (after > 0)
+                logf("clipboard: dropped (over %d bytes)", CLIP_MAX);
+            XFree(data);
+        }
+        XDeleteProperty(dpy, clip_win, sel->property);
+    }
+    if (conv_recheck) { conv_recheck = 0; owner_moved(XGetSelectionOwner(dpy, a_clip)); }
+}
+
+static void drain_x_events(void)
+{
+    while (XPending(dpy)) {
+        XEvent ev;
+        XNextEvent(dpy, &ev);
+        if (xfixes_ev_base >= 0 && ev.type == xfixes_ev_base + XFixesSelectionNotify) {
+            XFixesSelectionNotifyEvent *se = (XFixesSelectionNotifyEvent *)&ev;
+            /* subtype 0 (owner set) names the new owner; subtype 1
+             * (owner's window destroyed) can hand ownership to a
+             * clipboard manager — ask the server for the truth. */
+            if (se->selection == a_clip && se->subtype == 0)
+                owner_moved(se->owner);
+            else if (se->selection == a_clip && se->subtype == 1)
+                owner_moved(XGetSelectionOwner(dpy, a_clip));
+        } else if (ev.type == SelectionRequest) {
+            serve_selection(&ev.xselectionrequest);
+        } else if (ev.type == SelectionNotify) {
+            if (ev.xselection.selection == a_clip)
+                got_selection_text(&ev.xselection);
+        }
+    }
+    XFlush(dpy);
+}
+
+static void clipboard_init(void)
+{
+    a_clip = XInternAtom(dpy, "CLIPBOARD", False);
+    a_utf8 = XInternAtom(dpy, "UTF8_STRING", False);
+    a_targets = XInternAtom(dpy, "TARGETS", False);
+    a_text_utf8 = XInternAtom(dpy, "text/plain;charset=utf-8", False);
+    a_prop = XInternAtom(dpy, "LEDGEHOST_CLIPBOARD", False);
+    clip_win = XCreateSimpleWindow(dpy, DefaultRootWindow(dpy), 0, 0, 1, 1,
+                                 0, 0, 0);
+    /* SelectionNotify/SelectionRequest need no mask on our own window;
+     * mask SelectionClear so we notice losing ownership too. */
+    XSelectInput(dpy, clip_win, PropertyChangeMask);
+    clip_owner = XGetSelectionOwner(dpy, a_clip);
+    int evb = 0, erb = 0;
+    if (XFixesQueryExtension(dpy, &evb, &erb)) {
+        xfixes_ev_base = evb;
+        XFixesSelectSelectionInput(dpy, clip_win, a_clip,
+                                   XFixesSetSelectionOwnerNotifyMask |
+                                   XFixesSelectionWindowDestroyNotifyMask |
+                                   XFixesSelectionClientCloseNotifyMask);
+        logf("clipboard: watching CLIPBOARD via XFixes");
+    } else {
+        logf("clipboard: watching CLIPBOARD by 0.5 s poll (no XFixes)");
+    }
+}
+
+static void clipboard_poll(void)
+{
+    Window owner = XGetSelectionOwner(dpy, a_clip);
+    if (owner != clip_owner) owner_moved(owner);
+}
+
+/* op 7: a device's text becomes the host clipboard. */
+static void op_clipboard(const unsigned char *p, int n)
+{
+    if (n < 1 || n > CLIP_MAX) { logf("drop: clipboard op bad len %d", n); return; }
+    free(set_text);
+    set_text = malloc(n);
+    if (!set_text) return;
+    memcpy(set_text, p, n); set_len = n;
+    XSetSelectionOwner(dpy, a_clip, clip_win, CurrentTime);
+    clip_owner = clip_win;
+    XFlush(dpy);
+    logf("clipboard: %d byte(s) owned from device", n);
+}
+
 /* MARK: input loop */
 
 static int rate_ok(void)
@@ -299,13 +493,29 @@ int main(void)
     shift_kc = XKeysymToKeycode(dpy, XStringToKeysym("Shift_L"));
     scratch_reset();                      /* never inherit a stale remap */
     source_rect();
+    clipboard_init();
     logf("up: keycodes %d..%d scratch %d shift %d", min_kc, max_kc, scratch_kc, shift_kc);
 
     unsigned char buf[64 * 1024];
     size_t have = 0;
     static unsigned char pending_move[9];
     static int pending_move_n = 0;
+    int xfd = ConnectionNumber(dpy);
+    int quit = 0;
+    double poll_next = now_sec() + 0.5;
     for (;;) {
+        drain_x_events();
+        if (xfixes_ev_base < 0) {
+            double t = now_sec();
+            if (t >= poll_next) { clipboard_poll(); poll_next = t + 0.5; }
+        }
+        fd_set rfds;
+        FD_ZERO(&rfds); FD_SET(0, &rfds); FD_SET(xfd, &rfds);
+        struct timeval tv = { 0, 500000 };
+        int s = select(xfd + 1, &rfds, NULL, NULL,
+                       xfixes_ev_base < 0 ? &tv : NULL);
+        if (s < 0) { if (errno == EINTR) continue; break; }
+        if (s == 0 || !FD_ISSET(0, &rfds)) continue;
         ssize_t r = read(0, buf + have, sizeof buf - have);
         if (r == 0) break;                        /* stdin EOF */
         if (r < 0) { if (errno == EINTR) continue; break; }
@@ -333,12 +543,14 @@ int main(void)
             case 4: op_text(body + 1, len - 1); break;
             case 5: release_all(); break;
             case 6: release_all(); scroll_acc_x = scroll_acc_y = 0; break;
+            case 7: op_clipboard(body + 1, len - 1); break;
             default: logf("reject: unknown op %d", op); break;
             }
         }
         memmove(buf, buf + off, have - off);
         have -= off;
         if (have == sizeof buf) have = 0;         /* defensive */
+        if (quit) break;
     }
     if (pending_move_n) op_pointer(pending_move, 9);
     release_all();

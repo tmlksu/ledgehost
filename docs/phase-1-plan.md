@@ -611,3 +611,54 @@ injection is solid and held-state release is proven).
   the M4 fps flag is answered well enough for the slice
   (encoder output is a steady 60 au/s; the dips track full-
   screen-change bursts, not a delivery ceiling).
+- 2026-11-27 (later): clipboard sync (kind 32) — the
+  post-Phase-1 item, implemented to the upstream
+  ClipboardPolicy contract. ledgehost-input gained the X
+  side: a hidden window owns CLIPBOARD for device text,
+  serves SelectionRequest for UTF8_STRING / STRING /
+  text/plain;charset=utf-8 / TARGETS, and watches foreign
+  copies via XFixes 4.0 selection-owner events (ABI declared
+  directly; libXfixes.so.3 linked by soname — no header in
+  the devprefix; a 0.5 s owner+content poll is the fallback
+  when XFixes is absent); owner-window-destroy events
+  re-query the owner so clipboard-manager takeovers still
+  report; text the helper set itself is never reported
+  (self-set tracking). New IPC: daemon->helper op 7 "set
+  clipboard" (length-prefixed UTF-8) and helper->daemon
+  record kind 1 "clipboard changed" on the helper's stdout,
+  plumbed through a second NIOPipeBootstrap descriptor
+  takeover in InputService; the daemon re-validates UTF-8
+  and size before any broadcast. Daemon: clipboard: 1 in
+  WindowList; per-connection subscribe state (any decodable
+  kind 32 subscribes, stop unsubscribes, session end
+  clears); inbound runs ClipboardPolicy.hostReceives (4/s
+  rate, <=256 KiB text, <=1 MiB JSON, silent refusals); a
+  device text goes to the helper AND is relayed verbatim to
+  every OTHER subscriber; device-set text is remembered for
+  echo suppression (daemon-side defence in depth behind the
+  helper's own tracking). Content is never logged — sizes
+  and counts only. xquery gained "clip get"/"clip set TEXT
+  [S]" (XConvertSelection/XSetSelectionOwner); the probe
+  gained a "clipboard" mode (subscribe, --text/--count
+  send, size+sha8 report, --show prints synthetic text,
+  --stop unsubscribes, --text @big generates a 300 KiB
+  payload). Bug found in verification: the hand-declared
+  XFixesSelectionNotifyEvent had subtype at the wrong
+  offset (garbage fields → every event ignored); fixed to
+  the canonical layout, after which owner-change events
+  decode correctly. Verified headlessly (synthetic content,
+  scratch daemon on 17460, :21): (a) xquery clip set ->
+  subscribed probe received the same text; (b) probe --text
+  -> xquery clip get read it back, with the helper's own
+  set correctly not re-reported; (c) a second subscribed
+  probe received the relayed text exactly once while the
+  sender received nothing (no echo); (d) a 300 KiB text was
+  refused (tooLong) and 10 sends in <1 s were refused past
+  4/s (rate) — the session and later sends unaffected;
+  (e) stop ended delivery ("-> 0 subscriber(s)"). Known
+  gap vs upstream: the locked-pause (host locked ->
+  clipboard paused) is not implemented — this host has no
+  lock-state detection. Real-client acceptance still open:
+  desktop copy -> iPad paste, iPad copy -> desktop paste,
+  and whether the genuine client sends image fields
+  (ignored this generation) or stop on disconnect.

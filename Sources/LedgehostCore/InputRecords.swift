@@ -14,6 +14,12 @@ public enum InputRecord {
     public static let opText: UInt8 = 4
     public static let opReleaseAll: UInt8 = 5
     public static let opReset: UInt8 = 6
+    /// Device text -> host CLIPBOARD selection.
+    public static let opClipboard: UInt8 = 7
+    /// Helper -> daemon record op: the CLIPBOARD selection's text
+    /// changed under a foreign owner. (stdin ops and stdout records
+    /// share the framing, not the op namespace.)
+    public static let recordClipboardText: UInt8 = 1
 
     public static let pointerMove: UInt8 = 0
     public static let pointerLeftDown: UInt8 = 1
@@ -57,6 +63,28 @@ public enum InputRecord {
 
     public static let releaseAll = record(op: opReleaseAll)
     public static let reset = record(op: opReset)
+
+    /// A device's clipboard text: the helper validates UTF-8 length.
+    public static func clipboard(_ text: String) -> Data {
+        record(op: opClipboard, body: Data(text.utf8))
+    }
+
+    /// Bytes the next helper -> daemon record needs (header + body),
+    /// or nil if the buffer does not hold a full record header yet.
+    public static func outputRecordLength(_ d: Data) -> Int? {
+        guard d.count >= 4 else { return nil }
+        let len = Int(d.readBE(UInt32.self, at: 0))
+        guard len >= 1, len <= 256 * 1024 + 1 else { return -1 }
+        return 4 + len
+    }
+
+    /// Parse one helper -> daemon record; nil on bad framing.
+    public static func parseOutput(_ d: Data) -> (op: UInt8, body: Data)? {
+        guard d.count >= 5 else { return nil }
+        let len = Int(d.readBE(UInt32.self, at: 0))
+        guard len >= 1, len == d.count - 4 else { return nil }
+        return (d[4], d.subdata(in: 5..<d.count))
+    }
 }
 
 /// InputEvent → op records. Holds the modifier state across events so

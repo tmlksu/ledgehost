@@ -14,12 +14,14 @@ import Glibc
 // (op 5), and the helper itself releases everything on exit.
 
 final class InputService {
-    private let loop: EventLoop
+    let loop: EventLoop
     private let display: String
     private let xauthority: String?
 
     private var process: Process?
     private var channel: Channel?         // us → helper stdin
+    private var outChannel: Channel?      // helper stdout → us
+    var onClipboard: ((String) -> Void)?  // a foreign client's text
     private var running = false
     private var restarts = 0
     private var lastRestart: Date = .distantPast
@@ -60,9 +62,9 @@ final class InputService {
                                      "HOME": NSHomeDirectory()]
         if let xauthority { env["XAUTHORITY"] = xauthority }
         p.environment = env
-        let inPipe = Pipe(), errPipe = Pipe()
+        let inPipe = Pipe(), outPipe = Pipe(), errPipe = Pipe()
         p.standardInput = inPipe
-        p.standardOutput = FileHandle.nullDevice
+        p.standardOutput = outPipe
         p.standardError = errPipe
         do { try p.run() } catch {
             print(Log.stamp(), "ledgehostd: input: spawn failed: \(error)")
@@ -71,9 +73,10 @@ final class InputService {
         process = p
         running = true
         let inFD = dup(inPipe.fileHandleForWriting.fileDescriptor)
+        let outFD = dup(outPipe.fileHandleForReading.fileDescriptor)
         var pair: [Int32] = [-1, -1]
         if socketpair(AF_UNIX, Int32(SOCK_STREAM.rawValue), 0, &pair) != 0 {
-            close(inFD); failed(); return
+            close(inFD); close(outFD); failed(); return
         }
         NIOPipeBootstrap(group: loop)
             .channelOption(ChannelOptions.allowRemoteHalfClosure, value: true)
@@ -84,6 +87,24 @@ final class InputService {
                 case .failure(let e):
                     print(Log.stamp(), "ledgehostd: input: pipe channel failed: \(e)")
                     close(pair[1]); self?.failed()
+                }
+            }
+        var outPair: [Int32] = [-1, -1]
+        if socketpair(AF_UNIX, Int32(SOCK_STREAM.rawValue), 0, &outPair) != 0 {
+            close(outFD); failed(); return
+        }
+        NIOPipeBootstrap(group: loop)
+            .channelOption(ChannelOptions.allowRemoteHalfClosure, value: true)
+            .takingOwnershipOfDescriptors(input: outFD, output: outPair[0])
+            .whenComplete { [weak self] result in
+                switch result {
+                case .success(let ch):
+                    self?.outChannel = ch
+                    close(outPair[1])
+                    _ = try? ch.pipeline.addHandler(InputOutputHandler(service: self))
+                case .failure(let e):
+                    print(Log.stamp(), "ledgehostd: input: output pipe failed: \(e)")
+                    close(outPair[1]); self?.failed()
                 }
             }
         errPipe.fileHandleForReading.readabilityHandler = { fh in
@@ -104,6 +125,8 @@ final class InputService {
         let p = process
         channel?.close(promise: nil)         // stdin EOF → helper releases held state itself
         channel = nil
+        outChannel?.close(promise: nil)
+        outChannel = nil
         process = nil
         // SIGKILL/SIGTERM before the helper drains stdin would strand
         // held keys (observed: stuck keycode 38). Give the graceful EOF
@@ -139,7 +162,42 @@ final class InputService {
         channel.writeAndFlush(buf, promise: nil)
     }
 
+    /// op 7: a device's text becomes the host CLIPBOARD selection.
+    func setClipboard(_ text: String) { send([InputRecord.clipboard(text)]) }
+
     /// The injecting session ended (or the arbitration moved): release
     /// everything it held.
     func releaseHeld() { send([InputRecord.releaseAll]) }
+}
+
+/// Reads framed records off the input helper's stdout (currently op 1,
+/// CLIPBOARD text changed under a foreign owner).
+private final class InputOutputHandler: ChannelInboundHandler {
+    typealias InboundIn = ByteBuffer
+    private weak var service: InputService?
+    private var buffer = Data()
+
+    init(service: InputService?) { self.service = service }
+
+    func channelRead(context: ChannelHandlerContext, data: NIOAny) {
+        var buf = unwrapInboundIn(data)
+        if let bytes = buf.readBytes(length: buf.readableBytes) { buffer.append(contentsOf: bytes) }
+        while let total = InputRecord.outputRecordLength(buffer) {
+            guard total > 0 else {
+                print(Log.stamp(), "ledgehostd: input: bad output record — dropping rest")
+                buffer.removeAll(); return
+            }
+            guard buffer.count >= total else { return }
+            let rec = buffer.subdata(in: buffer.startIndex..<buffer.startIndex + total)
+            buffer.removeSubrange(buffer.startIndex..<buffer.startIndex + total)
+            guard let (op, body) = InputRecord.parseOutput(rec) else { continue }
+            guard op == InputRecord.recordClipboardText else { continue }
+            guard let text = String(data: body, encoding: .utf8) else {
+                print(Log.stamp(), "ledgehostd: input: clipboard record not UTF-8 — dropped")
+                continue
+            }
+            guard let service else { continue }
+            service.loop.execute { service.onClipboard?(text) }
+        }
+    }
 }

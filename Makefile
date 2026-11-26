@@ -33,7 +33,7 @@ DEVINC := -I$(DEVPREFIX)/usr/include/gstreamer-1.0 \
 GST_LIBS := -l:libgstapp-1.0.so.0 -l:libgstvideo-1.0.so.0 \
             -l:libgstbase-1.0.so.0 -l:libgstreamer-1.0.so.0 \
             -lgobject-2.0 -lglib-2.0
-X11_LIBS := -l:libXtst.so.6 -lX11 -lXext
+X11_LIBS := -l:libXtst.so.6 -l:libXfixes.so.3 -lX11 -lXext
 
 helpers: $(BIN)/ledgehost-media $(BIN)/ledgehost-input $(BIN)/xquery
 

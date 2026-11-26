@@ -41,6 +41,10 @@ struct Args {
     var out: String = "recording"
     var script: String = ""
     var stall: Double = 0
+    var text: String = ""
+    var show = false
+    var count = 1
+    var stop = false
 }
 
 func parseArgs() -> Args {
@@ -55,6 +59,10 @@ func parseArgs() -> Args {
         case "--seconds": args.seconds = Double(it.next() ?? "") ?? args.seconds
         case "--out": args.out = it.next() ?? args.out
         case "--script": args.script = it.next() ?? args.script
+        case "--text": args.text = it.next() ?? args.text
+        case "--show": args.show = true
+        case "--count": args.count = Int(it.next() ?? "") ?? args.count
+        case "--stop": args.stop = true
         case "--stall": args.stall = Double(it.next() ?? "") ?? args.stall
         default: break
         }
@@ -63,7 +71,7 @@ func parseArgs() -> Args {
 }
 
 let args = parseArgs()
-guard ["pair", "connect", "record", "input"].contains(args.mode) else {
+guard ["pair", "connect", "record", "input", "clipboard"].contains(args.mode) else {
     fputs("usage: ledgehost-probe pair --code <12 digits> [--host H] [--port P]\n       ledgehost-probe connect [--host H] [--port P]\n       ledgehost-probe record [--host H] [--port P] [--seconds N] [--out DIR]\n", stderr)
     exit(64)
 }
@@ -376,6 +384,54 @@ if args.mode == "pair" {
     print("probe: recorded \(frameIndex) frame(s), \(parameterSets.count) parameter set(s) -> \(outDir.path)")
     print("probe: verify with: ffprobe -v error -count_frames -select_streams v:0 -show_entries stream=nb_read_frames,width,height,coded_width,coded_height -of default=nw=1 \(streamURL.path)")
     exit(firstFrame && !parameterSets.isEmpty ? 0 : 1)
+} else if args.mode == "clipboard" {
+    // P2 clipboard mode: subscribe ({}), optionally send --text
+    // (--count times), report received kind 32s by size and hash;
+    // --show prints the synthetic text itself.
+    guard let saved = savedHost else {
+        fputs("probe: no saved host — pair first\n", stderr); exit(64)
+    }
+    let hostBox = HostBox()
+    let collector = Collector()
+    var listSeen = false
+    var received = 0
+    collector.onMessage = { kind, payload, _ts in
+        if kind == .windowList { listSeen = true }
+        guard kind == .clipboard else { return }
+        received += 1
+        let clip = Wire.decode(Clipboard.self, from: payload)
+        let hash = clip?.text.map { String(SHA256.hash(data: Data($0.utf8)).prefix(8).map { String(format: "%02x", $0) }.joined()) } ?? "-"
+        print("probe: clipboard #\(received): \(payload.count)B json, text \(clip?.text?.utf8.count ?? 0)B sha8=\(hash)")
+        if args.show, let t = clip?.text { print("probe: text: \(t)") }
+    }
+    let channel = try connect(alpn: "sill/1", hostBox: hostBox, collector: collector)
+    guard waitFor(5, until: { hostBox.fingerprint != nil }),
+          Base64URL.encode(hostBox.fingerprint!) == saved.fingerprint else {
+        print("probe: handshake/pin failure"); try? channel.close().wait(); exit(1)
+    }
+    send(channel, kind: .hello, payload: Wire.encode(Hello(appVersion: "0.0.0-probe", protocol: 1,
+                                                           device: "ledgehost-probe", audio: [])))
+    guard waitFor(5, until: { listSeen }) else {
+        fputs("probe: no window list\n", stderr); exit(1)
+    }
+    send(channel, kind: .selectSource, payload: Wire.encode(StreamSource.desktop))
+    send(channel, kind: .clipboard, payload: ClipboardPolicy.subscription)
+    if args.stop {
+        send(channel, kind: .clipboard, payload: ClipboardPolicy.stopping)
+        _ = waitFor(1, until: { false })
+    }
+    let sendText = args.text == "@big" ? String(repeating: "X", count: 300 * 1024) : args.text
+    if !sendText.isEmpty {
+        for i in 0..<args.count {
+            send(channel, kind: .clipboard, payload: Wire.encode(Clipboard(text: sendText)))
+            if args.count > 1 { Thread.sleep(forTimeInterval: 0.05) }
+            _ = i
+        }
+    }
+    _ = waitFor(args.seconds, until: { false })
+    try? channel.close().wait()
+    print("probe: CLIPBOARD DONE \(received) received")
+    exit(0)
 } else if args.mode == "input" {
     // P1-M3 synthetic input: subscribe to the desktop, then replay a
     // semicolon-separated script of kind 8 events:

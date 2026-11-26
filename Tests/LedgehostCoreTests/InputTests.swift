@@ -115,6 +115,52 @@ final class InputTests: XCTestCase {
         XCTAssertEqual(op, InputRecord.opReleaseAll)
         XCTAssertTrue(body.isEmpty)
     }
+
+    // MARK: - clipboard (op 7, both directions)
+
+    func testSetClipboardRecord() {
+        let (op, body) = parse(InputRecord.clipboard("synthetic-text"))!
+        XCTAssertEqual(op, InputRecord.opClipboard)
+        XCTAssertEqual(String(decoding: body, as: UTF8.self), "synthetic-text")
+    }
+
+    func testOutputRecordRoundTrip() {
+        // helper -> daemon framing: [len][op][utf8], split with
+        // outputRecordLength exactly as InputOutputHandler does.
+        var rec = Data([0, 0, 0, 0, InputRecord.recordClipboardText])
+        rec.append(Data("clip-text-42".utf8))
+        let n = rec.count - 4
+        rec[0] = UInt8(n >> 24); rec[1] = UInt8(n >> 16)
+        rec[2] = UInt8(n >> 8);  rec[3] = UInt8(n)
+        XCTAssertEqual(InputRecord.outputRecordLength(rec), rec.count)
+        XCTAssertEqual(InputRecord.outputRecordLength(rec.dropLast(3)), rec.count)
+        // a second record appended: first parses alone, rest remain
+        var two = rec
+        two.append(contentsOf: InputRecord.releaseAll)
+        XCTAssertEqual(InputRecord.outputRecordLength(two), rec.count)
+        let (kind, bodyOut) = InputRecord.parseOutput(rec)!
+        XCTAssertEqual(kind, InputRecord.recordClipboardText)
+        XCTAssertEqual(String(decoding: bodyOut, as: UTF8.self), "clip-text-42")
+    }
+
+    func testOutputRecordValidation() {
+        XCTAssertEqual(InputRecord.outputRecordLength(Data([0, 1])), nil)   // short header
+        XCTAssertEqual(InputRecord.outputRecordLength(Data([0, 0, 0, 0])), -1) // len 0
+        XCTAssertEqual(InputRecord.outputRecordLength(Data([0xff, 0, 0, 0])), -1) // oversize
+        // daemon->helper ops and helper->daemon record kinds share
+        // byte 4; the CHANNEL discriminates (a pointer op record read
+        // on the output channel would parse as kind 1 — the daemon
+        // only applies this parse to helper stdout)
+        let (kind2, _) = InputRecord.parseOutput(InputRecord.pointer(kind: InputRecord.pointerMove, x: 0.5, y: 0.5))!
+        XCTAssertEqual(kind2, InputRecord.opPointer)
+        // invalid UTF-8 body still parses structurally; the daemon
+        // re-validates UTF-8 before any broadcast
+        let bad = Data([0, 0, 0, 3, InputRecord.recordClipboardText, 0xff, 0xfe])
+        XCTAssertEqual(InputRecord.outputRecordLength(bad), 7)
+        let (kind3, body3) = InputRecord.parseOutput(bad)!
+        XCTAssertEqual(kind3, InputRecord.recordClipboardText)
+        XCTAssertNil(String(data: body3, encoding: .utf8))
+    }
 }
 
 private extension Data {

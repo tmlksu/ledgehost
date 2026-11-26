@@ -112,6 +112,24 @@ let media = MediaService(group: group,
 let input = InputService(group: group,
                          display: targetDisplay,
                          xauthority: processEnv["XAUTHORITY"])
+// A foreign client's CLIPBOARD text → every subscribed connection,
+// unless it is the text a device itself just set (echo suppression).
+input.onClipboard = { text in
+    if text == deviceSetText {
+        deviceSetText = nil
+        print(Log.stamp(), "ledgehostd: clipboard: \(text.utf8.count) byte(s) match the device's own set — not broadcast")
+        return
+    }
+    guard let payload = ClipboardPolicy.payload(text: text) else {
+        print(Log.stamp(), "ledgehostd: clipboard: host text \(text.utf8.count) byte(s) not sendable — dropped")
+        return
+    }
+    var n = 0
+    for session in registry.sessions.values where session.clipboardSubscribed {
+        session.send(kind: .clipboard, payload: payload); n += 1
+    }
+    print(Log.stamp(), "ledgehostd: clipboard: host text \(text.utf8.count) byte(s) -> \(n) subscriber(s)")
+}
 
 extension SessionRegistry {
     /// The one serialized input stream (decision 10): only the session
@@ -122,6 +140,11 @@ extension SessionRegistry {
     }
 }
 private var injectorStorage: ConnectionHandler?
+
+/// The last text a device set: the helper's own tracking is the
+/// primary echo guard; this is the daemon-side defence in depth
+/// (dropped when the helper reports the same text back).
+private var deviceSetText: String?
 
 /// A small arrow PNG for the one static cursorShape (kind 14) sent on
 /// selectSource (decision 5; whether the client can draw a usable
@@ -205,6 +228,11 @@ final class ConnectionHandler: ChannelInboundHandler {
     var label = "?"
     var watchingDesktop = false
     var watcher = MediaService.Watcher()
+    /// kind 32: this connection asked for the host's copies.
+    var clipboardSubscribed = false
+    /// Timestamps of the connection's kind 32s taken in the last
+    /// second (ClipboardPolicy.hostReceives' rate state).
+    var clipboardArrivals: [Double] = []
 
     init(peer: PeerBox) { self.peer = peer }
 
@@ -363,6 +391,8 @@ final class ConnectionHandler: ChannelInboundHandler {
                 }
             case .input:
                 handleInput(payload: payload)
+            case .clipboard:
+                handleClipboard(context: context, payload: payload)
             case .changeSettings:
                 handleChangeSettings(context: context, payload: payload)
             case .pairingWanted:
@@ -459,6 +489,41 @@ final class ConnectionHandler: ChannelInboundHandler {
         }
     }
 
+    /// kind 32 clipboard (ClipboardPolicy): a decodable message
+    /// subscribes; a non-empty text becomes the host clipboard and is
+    /// relayed verbatim to every OTHER subscriber; stop wins. Refusals
+    /// (undecodable, oversize, rate) are silent. Content is never
+    /// logged — sizes and counts only.
+    private func handleClipboard(context: ChannelHandlerContext, payload: Data) {
+        guard payload.count <= ClipboardPolicy.maxPayload else { return }
+        let (ask, kept) = ClipboardPolicy.hostReceives(payload,
+                                                       arrivals: clipboardArrivals,
+                                                       now: Date().timeIntervalSince1970)
+        clipboardArrivals = kept
+        switch ask {
+        case .subscribe:
+            if !clipboardSubscribed {
+                clipboardSubscribed = true
+                print(Log.stamp(), "ledgehostd: \(label) subscribed to the clipboard")
+            }
+        case .set(let text):
+            clipboardSubscribed = true
+            print(Log.stamp(), "ledgehostd: \(label) set the clipboard (\(text.utf8.count) bytes)")
+            deviceSetText = text          // echo suppression, defence in depth
+            input.setClipboard(text)
+            for other in registry.sessions.values where other !== self && other.clipboardSubscribed {
+                other.send(kind: .clipboard, payload: payload)
+            }
+        case .stop:
+            if clipboardSubscribed {
+                clipboardSubscribed = false
+                print(Log.stamp(), "ledgehostd: \(label) unsubscribed from the clipboard")
+            }
+        case .refuse(let why):
+            print(Log.stamp(), "ledgehostd: \(label) clipboard refused (\(why))")
+        }
+    }
+
     private func handleViewport(payload: Data) {
         guard let v = Wire.decode(Viewport.self, from: payload) else {
             print(Log.stamp(), "ledgehostd: viewport from \(label): undecodable — ignored")
@@ -532,7 +597,8 @@ final class ConnectionHandler: ChannelInboundHandler {
 
     private func sendWindowList(context: ChannelHandlerContext, active: StreamSource) {
         let list = WindowList(macName: identity.name, windows: [], active: active,
-                              launchID: identity.launchID, hostVersion: "0.0.0-linux", protocol: 1)
+                              launchID: identity.launchID, hostVersion: "0.0.0-linux",
+                              protocol: 1, clipboard: ClipboardPolicy.generation)
         send(context: context, kind: .windowList, payload: Wire.encode(list))
     }
 
@@ -587,6 +653,8 @@ final class ConnectionHandler: ChannelInboundHandler {
             media.watcherLeft(hasWatchers: !registry.watchers.isEmpty)
             input.watcherLeft(hasWatchers: !registry.watchers.isEmpty)
         }
+        clipboardSubscribed = false
+        clipboardArrivals = []
         registry.sessions.removeValue(forKey: key)
         context.fireChannelInactive()
     }
