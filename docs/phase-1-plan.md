@@ -595,3 +595,19 @@ injection is solid and held-state release is proven).
   pipeline (fps now 120)" then "pipeline up ...
   framerate=120/1", reverted to 60 after; watchers rejoin via
   kind 0 + IDR.
+- 2026-11-27 (night): P1-M3 real-client acceptance PASSED,
+  and with it the Phase 1 slice is complete end to end. The
+  M3-M5 build replaced the M2 daemon on port 17455 (config
+  backed up first); from the iPad the user clicked, typed
+  into a text editor, and scrolled on the :21 desktop - all
+  confirmed working. Shape-only log observations from the
+  session: typing from the software keyboard arrives as
+  .text events (95, one character each), with only 2 .key
+  events - the keyRepeat-nil split the sources predicted;
+  scrolling arrives as both .scroll steps and .scrollGesture
+  phases (momentum included); pointer events flowed at
+  interaction rate (1229). ClientStats in steady state read
+  fps 59-60 with dips to 45-54 during input/scroll bursts -
+  the M4 fps flag is answered well enough for the slice
+  (encoder output is a steady 60 au/s; the dips track full-
+  screen-change bursts, not a delivery ceiling).
