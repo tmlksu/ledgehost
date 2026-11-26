@@ -5,6 +5,13 @@ import NIOCore
 import NIOSSL
 import NIOTLS
 import StreamProtocol
+#if canImport(Glibc)
+import Glibc
+#endif
+
+// Logs must reach files and journals unbuffered: a pairing code or a
+// gate decision sitting in a stdio buffer helps nobody.
+setvbuf(stdout, nil, _IONBF, 0)
 
 // ledgehost-probe — the reference client (Phase 0 plan, M3): a headless
 // Linux client speaking the same protocol, so the host's handshake can
