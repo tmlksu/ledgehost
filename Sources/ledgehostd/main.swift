@@ -34,8 +34,8 @@ do {
     fputs("ledgehostd: \(error)\n", stderr)
     exit(2)
 }
-print("ledgehostd: \(identity.name) — mac id \(identity.macID), fingerprint \(Base64URL.encode(identity.fingerprint))")
-print("ledgehostd: \(pins.count) paired device(s); config in \(configDir.path)")
+print(Log.stamp(), "ledgehostd: \(identity.name) — mac id \(identity.macID), fingerprint \(Base64URL.encode(identity.fingerprint))")
+print(Log.stamp(), "ledgehostd: \(pins.count) paired device(s); config in \(configDir.path)")
 
 let pairing = PairingManager(identity: identity, pins: pins, port: port)
 
@@ -51,10 +51,10 @@ if let tag = RecognitionTag.make(recognitionKey: identity.recognitionKey) {
     do {
         try process.run()
         avahi = process
-        print("ledgehostd: advertising _sill._tcp on port \(port) via avahi (p=1, r=\(tag))")
+        print(Log.stamp(), "ledgehostd: advertising _sill._tcp on port \(port) via avahi (p=1, r=\(tag))")
     } catch {
-        print("ledgehostd: avahi-publish-service not available; advertise manually:")
-        print("  avahi-publish-service '\(identity.name)' _sill._tcp \(port) p=1 r=\(tag)")
+        print(Log.stamp(), "ledgehostd: avahi-publish-service not available; advertise manually:")
+        print(Log.stamp(), "  avahi-publish-service '\(identity.name)' _sill._tcp \(port) p=1 r=\(tag)")
     }
 }
 
@@ -107,15 +107,15 @@ final class ConnectionHandler: ChannelInboundHandler {
                 state = .pairing
                 deadline = context.eventLoop.scheduleTask(in: .seconds(10)) { [weak self] in
                     guard let self, self.state == .pairing else { return }
-                    print("ledgehostd: pairing connection timed out")
+                    print(Log.stamp(), "ledgehostd: pairing connection timed out")
                     context.close(promise: nil)
                 }
             case "sill/1":
                 if pins.isPinned(fp) {
                     state = .awaitingHello
-                    print("ledgehostd: session from paired \(RemoteIdentityShortName(fp))")
+                    print(Log.stamp(), "ledgehostd: session from paired \(RemoteIdentityShortName(fp))")
                 } else {
-                    print("ledgehostd: session from unpaired \(RemoteIdentityShortName(fp)) — closing")
+                    print(Log.stamp(), "ledgehostd: session from unpaired \(RemoteIdentityShortName(fp)) — closing")
                     context.close(promise: nil)
                 }
             default:
@@ -137,7 +137,7 @@ final class ConnectionHandler: ChannelInboundHandler {
                   let header = StreamMessage.parseHeader(buffer) else { return }
             let cap = state == .pairing ? StreamMessage.maxPairingPayload : StreamMessage.maxClientPayload
             guard header.payloadLength <= cap else {
-                print("ledgehostd: payload over the cap (\(header.payloadLength) > \(cap)) — closing")
+                print(Log.stamp(), "ledgehostd: payload over the cap (\(header.payloadLength) > \(cap)) — closing")
                 context.close(promise: nil); state = .done; return
             }
             guard buffer.count >= StreamMessage.headerLength + header.payloadLength else { return }
@@ -171,10 +171,10 @@ final class ConnectionHandler: ChannelInboundHandler {
 
         case .awaitingHello:
             guard kind == .hello, let hello = Wire.decode(Hello.self, from: payload) else {
-                print("ledgehostd: session's first message was not a Hello — closing")
+                print(Log.stamp(), "ledgehostd: session's first message was not a Hello — closing")
                 context.close(promise: nil); state = .done; return
             }
-            print("ledgehostd: hello: app \(hello.appVersion ?? "?") protocol \(hello.protocol ?? -1) device \(hello.device ?? "?") audio \(hello.audio ?? [])")
+            print(Log.stamp(), "ledgehostd: hello: app \(hello.appVersion ?? "?") protocol \(hello.protocol ?? -1) device \(hello.device ?? "?") audio \(hello.audio ?? [])")
             state = .session
             sendCatalog(context: context)
             tick = context.eventLoop.scheduleRepeatedTask(initialDelay: .seconds(10), delay: .seconds(10)) { [weak self] _ in
@@ -187,11 +187,11 @@ final class ConnectionHandler: ChannelInboundHandler {
             case .ping:
                 send(context: context, kind: .pong, payload: payload)
             case .selectSource:
-                print("ledgehostd: selectSource \(String(data: payload, encoding: .utf8) ?? "?") (streaming arrives in Phase 1)")
+                print(Log.stamp(), "ledgehostd: selectSource \(String(data: payload, encoding: .utf8) ?? "?") (streaming arrives in Phase 1)")
             case .pairingWanted:
-                print("ledgehostd: pairingWanted on a session — ignored")
+                print(Log.stamp(), "ledgehostd: pairingWanted on a session — ignored")
             default:
-                print("ledgehostd: session message kind \(kind.rawValue) (\(payload.count) bytes)")
+                print(Log.stamp(), "ledgehostd: session message kind \(kind.rawValue) (\(payload.count) bytes)")
             }
 
         case .awaitingGate, .done:
@@ -226,7 +226,7 @@ final class ConnectionHandler: ChannelInboundHandler {
     }
 
     func errorCaught(context: ChannelHandlerContext, error: Error) {
-        print("ledgehostd: connection error \(error)")
+        print(Log.stamp(), "ledgehostd: connection error \(error)")
         context.close(promise: nil)
     }
 }
@@ -273,7 +273,7 @@ let bootstrap = ServerBootstrap(group: group)
     }
 
 let server = try bootstrap.bind(host: "0.0.0.0", port: port).wait()
-print("ledgehostd: listening on port \(port)")
+print(Log.stamp(), "ledgehostd: listening on port \(port)")
 
 // Clean shutdown: stop advertising, close the listener.
 let cleanup: @convention(c) (Int32) -> Void = { _ in

@@ -40,10 +40,10 @@ final class PairingManager {
         _ = SillRandom.fill(&secret)
         qrSecret = Data(secret)
         triesLeft = Self.maxTries
-        print("pairing: code \(PairingCode.grouped(code))")
+        print(Log.stamp(), "pairing: code \(PairingCode.grouped(code))")
         let link = PairLink(fingerprint: identity.fingerprint, secret: qrSecret,
                             name: identity.name, port: port, addresses: [])
-        print("pairing: link \(link.url)")
+        print(Log.stamp(), "pairing: link \(link.url)")
     }
 
     /// Answers one kind 19. `deviceFingerprint` comes from the TLS session.
@@ -84,10 +84,10 @@ final class PairingManager {
             do {
                 try pins.add(fingerprint: deviceFingerprint, name: request.name, model: request.model)
             } catch {
-                print("pairing: could not save the pin: \(error)")
+                print(Log.stamp(), "pairing: could not save the pin: \(error)")
                 return PairResult(ok: false, reason: PairResult.closed)
             }
-            print("pairing: paired \(RemoteIdentityShortName(deviceFingerprint)) (\(SafeText.label(request.name, limit: 64)))")
+            print(Log.stamp(), "pairing: paired \(RemoteIdentityShortName(deviceFingerprint)) (\(SafeText.label(request.name, limit: 64)))")
             rotateLocked()
             return PairResult(ok: true, proof: Base64URL.encode(proofM), macID: identity.macID,
                               name: identity.name, recognitionKey: Base64URL.encode(identity.recognitionKey))

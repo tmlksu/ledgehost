@@ -10,6 +10,15 @@ import Glibc
 // permissions: a silently regenerated identity would break every pin
 // a device holds, so a corrupt file is a loud failure, never a reset.
 
+enum Log {
+    private static let formatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "HH:mm:ss"
+        return f
+    }()
+    static func stamp() -> String { formatter.string(from: Date()) }
+}
+
 enum StoreError: Error {
     case corrupt(String)
     case io(String)
