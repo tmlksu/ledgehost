@@ -109,6 +109,19 @@ let media = MediaService(group: group,
                          display: targetDisplay,
                          xauthority: processEnv["XAUTHORITY"],
                          fpsSource: { registry.maxWantedFPS })
+let input = InputService(group: group,
+                         display: targetDisplay,
+                         xauthority: processEnv["XAUTHORITY"])
+
+extension SessionRegistry {
+    /// The one serialized input stream (decision 10): only the session
+    /// that most recently selected the desktop injects.
+    var injector: ConnectionHandler? {
+        get { injectorStorage }
+        set { injectorStorage = newValue }
+    }
+}
+private var injectorStorage: ConnectionHandler?
 
 /// A small arrow PNG for the one static cursorShape (kind 14) sent on
 /// selectSource (decision 5; whether the client can draw a usable
@@ -230,7 +243,12 @@ final class ConnectionHandler: ChannelInboundHandler {
             switch negotiated {
             case "sill-pair/1":
                 state = .pairing
-                deadline = context.eventLoop.scheduleTask(in: .seconds(10)) { [weak self] in
+                // 30 s, not the protocol's nominal 10: a debug-build
+                // client spends ~11 s deriving the 600k-round pairing
+                // key before it can send its one message. Still a
+                // bounded half-open window for the door-hardening the
+                // timeout exists for.
+                deadline = context.eventLoop.scheduleTask(in: .seconds(30)) { [weak self] in
                     guard let self, self.state == .pairing else { return }
                     print(Log.stamp(), "ledgehostd: pairing connection timed out")
                     context.close(promise: nil)
@@ -341,7 +359,7 @@ final class ConnectionHandler: ChannelInboundHandler {
                     print(Log.stamp(), "ledgehostd: stats \(label): fps \(stats.fps) frameAge \(stats.frameAgeMs) ms rtt \(stats.rttMs) ms")
                 }
             case .input:
-                break   // P1-M3: input injection; never log payloads
+                handleInput(payload: payload)
             case .changeSettings:
                 handleChangeSettings(context: context, payload: payload)
             case .pairingWanted:
@@ -365,6 +383,13 @@ final class ConnectionHandler: ChannelInboundHandler {
         switch source {
         case .desktop:
             print(Log.stamp(), "ledgehostd: \(label) selected the desktop")
+            if registry.injector !== self && registry.injector != nil {
+                // Arbitration moved: release what the previous injector
+                // held before the new one takes over.
+                input.releaseHeld()
+                print(Log.stamp(), "ledgehostd: input injector -> \(label)")
+            }
+            registry.injector = self
             if !watchingDesktop {
                 watchingDesktop = true
                 watcher = MediaService.Watcher()       // .needsIDR
@@ -380,13 +405,19 @@ final class ConnectionHandler: ChannelInboundHandler {
                          keyframe: true)
                 }
                 media.watcherJoined()
+                input.watcherJoined()
                 media.requestKeyframe()
             }
             sendWindowList(context: context, active: .desktop)
         case .none:
             if watchingDesktop {
                 watchingDesktop = false
+                if registry.injector === self {
+                    registry.injector = nil
+                    input.releaseHeld()
+                }
                 media.watcherLeft(hasWatchers: !registry.watchers.isEmpty)
+                input.watcherLeft(hasWatchers: !registry.watchers.isEmpty)
                 print(Log.stamp(), "ledgehostd: \(label) unselected the desktop")
             }
             sendWindowList(context: context, active: .none)
@@ -395,6 +426,33 @@ final class ConnectionHandler: ChannelInboundHandler {
             // current source through the list.
             print(Log.stamp(), "ledgehostd: \(label) selected window \(id) — no windows on this host")
             sendWindowList(context: context, active: watchingDesktop ? .desktop : .none)
+        }
+    }
+
+    /// kind 8 → op records for the input helper. Only the injector
+    /// session (most recent .desktop selector) may inject; events are
+    /// rate-capped at 240/s and validated by the translator before
+    /// they reach XTest (the helper re-validates, defence in depth).
+    /// Logging shows the SHAPE only — event kind, HID usage, modifier
+    /// bits — never text payloads or key identities beyond usages.
+    private func handleInput(payload: Data) {
+        guard let ev = Wire.decode(InputEvent.self, from: payload) else { return }
+        switch ev {
+        case .pointer(let a, let x, let y):
+            print(Log.stamp(), "ledgehostd: input \(label): pointer \(a.rawValue) x\(Int(x*1000))y\(Int(y*1000))")
+        case .scroll(_, _, let dx, let dy):
+            print(Log.stamp(), "ledgehostd: input \(label): scroll dx\(Int(dx*1000)) dy\(Int(dy*1000))")
+        case .text(let s):
+            print(Log.stamp(), "ledgehostd: input \(label): text (n=\(s.utf8.count))")
+        case .key(let u, let d, let m):
+            print(Log.stamp(), "ledgehostd: input \(label): key hid=0x\(String(u, radix: 16)) down=\(d) mods=0x\(String(m, radix: 16))")
+        case .scrollGesture(let phase, _, _):
+            print(Log.stamp(), "ledgehostd: input \(label): scrollGesture \(phase.rawValue)")
+        }
+        guard registry.injector === self else { return }
+        guard watcher.rateLimiter.allow(now: Date().timeIntervalSince1970) else { return }
+        if let records = watcher.translator.translate(ev) {
+            input.send(records)
         }
     }
 
@@ -481,7 +539,12 @@ final class ConnectionHandler: ChannelInboundHandler {
         deadline?.cancel()
         if watchingDesktop {
             watchingDesktop = false
+            if registry.injector === self {
+                registry.injector = nil
+                input.releaseHeld()
+            }
             media.watcherLeft(hasWatchers: !registry.watchers.isEmpty)
+            input.watcherLeft(hasWatchers: !registry.watchers.isEmpty)
         }
         registry.sessions.removeValue(forKey: key)
         context.fireChannelInactive()
@@ -498,6 +561,7 @@ final class ConnectionHandler: ChannelInboundHandler {
 wireMediaService()
 defer {
     media.shutdown()
+    input.shutdown()
     try? group.syncShutdownGracefully()
 }
 

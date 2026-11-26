@@ -23,6 +23,9 @@ setvbuf(stdout, nil, _IONBF, 0)
 //   ledgehost-probe record  --host H --port P --seconds N --out DIR
 //                           (subscribes to the desktop, saves kind 0/1
 //                           payloads plus a reassembled .h265 stream)
+//   ledgehost-probe input   --host H --port P --script "SCRIPT"
+//                           (subscribes to the desktop, sends the
+//                           scripted kind 8 events; see inputScript)
 //
 // Fingerprints always come from the TLS session, never from a message.
 // After pairing, the probe saves the host's fingerprint, Mac ID and
@@ -36,6 +39,7 @@ struct Args {
     var code: String?
     var seconds: Double = 10
     var out: String = "recording"
+    var script: String = ""
 }
 
 func parseArgs() -> Args {
@@ -49,6 +53,7 @@ func parseArgs() -> Args {
         case "--code": args.code = it.next()
         case "--seconds": args.seconds = Double(it.next() ?? "") ?? args.seconds
         case "--out": args.out = it.next() ?? args.out
+        case "--script": args.script = it.next() ?? args.script
         default: break
         }
     }
@@ -56,7 +61,7 @@ func parseArgs() -> Args {
 }
 
 let args = parseArgs()
-guard ["pair", "connect", "record"].contains(args.mode) else {
+guard ["pair", "connect", "record", "input"].contains(args.mode) else {
     fputs("usage: ledgehost-probe pair --code <12 digits> [--host H] [--port P]\n       ledgehost-probe connect [--host H] [--port P]\n       ledgehost-probe record [--host H] [--port P] [--seconds N] [--out DIR]\n", stderr)
     exit(64)
 }
@@ -198,6 +203,10 @@ func connect(alpn: String, hostBox: HostBox, collector: Collector) throws -> Cha
         .connect(host: args.host, port: args.port).wait()
 }
 
+extension Array {
+    subscript(safe i: Int) -> Element? { i >= 0 && i < count ? self[i] : nil }
+}
+
 func waitFor(_ seconds: TimeInterval, until condition: () -> Bool) -> Bool {
     let deadline = Date().addingTimeInterval(seconds)
     while Date() < deadline {
@@ -325,6 +334,72 @@ if args.mode == "pair" {
     print("probe: recorded \(frameIndex) frame(s), \(parameterSets.count) parameter set(s) -> \(outDir.path)")
     print("probe: verify with: ffprobe -v error -count_frames -select_streams v:0 -show_entries stream=nb_read_frames,width,height,coded_width,coded_height -of default=nw=1 \(streamURL.path)")
     exit(firstFrame && !parameterSets.isEmpty ? 0 : 1)
+} else if args.mode == "input" {
+    // P1-M3 synthetic input: subscribe to the desktop, then replay a
+    // semicolon-separated script of kind 8 events:
+    //   move X Y | down X Y | up X Y | rdown X Y | rup X Y
+    //   scroll DX DY | key USAGE[hex] [down|up] [MODS[hex]]
+    //   text STRING | stats
+    guard let saved = savedHost else {
+        fputs("probe: no saved host — pair first\n", stderr); exit(64)
+    }
+    let hostBox = HostBox()
+    let collector = Collector()
+    var listSeen = false
+    var gotSets = false, gotFrame = false
+    collector.onMessage = { kind, _ in
+        if kind == .windowList { listSeen = true }
+        if kind == .parameterSets { gotSets = true }
+        if kind == .frame { gotFrame = true }
+    }
+    let channel = try connect(alpn: "sill/1", hostBox: hostBox, collector: collector)
+    guard waitFor(5, until: { hostBox.fingerprint != nil }),
+          Base64URL.encode(hostBox.fingerprint!) == saved.fingerprint else {
+        print("probe: handshake/pin failure"); try? channel.close().wait(); exit(1)
+    }
+    send(channel, kind: .hello, payload: Wire.encode(Hello(appVersion: "0.0.0-probe", protocol: 1,
+                                                           device: "ledgehost-probe", audio: [])))
+    guard waitFor(5, until: { listSeen }) else {
+        fputs("probe: no window list\n", stderr); exit(1)
+    }
+    send(channel, kind: .selectSource, payload: Wire.encode(StreamSource.desktop))
+    _ = waitFor(3, until: { gotSets && gotFrame })
+    func num(_ s: String) -> Double {
+        let t = s.hasPrefix("0x") ? String(s.dropFirst(2)) : s
+        return s.hasPrefix("0x")
+            ? Double(UInt64(t, radix: 16) ?? 0) : (Double(t) ?? 0)
+    }
+    for (i, step) in args.script.split(separator: ";").map({ $0.trimmingCharacters(in: .whitespaces) }).enumerated() {
+        let f = step.split(separator: " ").map(String.init)
+        guard !f.isEmpty else { continue }
+        let ev: InputEvent?
+        switch f[0] {
+        case "move":   ev = .pointer(.move, x: num(f[safe: 1] ?? "0"), y: num(f[safe: 2] ?? "0"))
+        case "down":   ev = .pointer(.leftDown, x: num(f[safe: 1] ?? "0"), y: num(f[safe: 2] ?? "0"))
+        case "up":     ev = .pointer(.leftUp, x: num(f[safe: 1] ?? "0"), y: num(f[safe: 2] ?? "0"))
+        case "rdown":  ev = .pointer(.rightDown, x: num(f[safe: 1] ?? "0"), y: num(f[safe: 2] ?? "0"))
+        case "rup":    ev = .pointer(.rightUp, x: num(f[safe: 1] ?? "0"), y: num(f[safe: 2] ?? "0"))
+        case "scroll": ev = .scroll(x: 0.5, y: 0.5, dx: num(f[safe: 1] ?? "0"), dy: num(f[safe: 2] ?? "0"))
+        case "key":    ev = .key(hidUsage: UInt16(num(f[safe: 1] ?? "0")),
+                                 down: (f[safe: 2] ?? "down") == "down",
+                                 modifiers: UInt64(num(f[safe: 3] ?? "0")))
+        case "text":   ev = .text(f.dropFirst().joined(separator: " "))
+        case "stats":  ev = nil
+            ; send(channel, kind: .clientStats, payload: Wire.encode(
+                ClientStats(fps: 60, frameAgeMs: 0, rttMs: 0, device: "ledgehost-probe")))
+        case "sleep":  ev = nil; Thread.sleep(forTimeInterval: num(f[safe: 1] ?? "1"))
+        default:
+            print("probe: unknown script step '\(f[0])'"); ev = nil
+        }
+        if let ev {
+            send(channel, kind: .input, payload: Wire.encode(ev))
+            print("probe: sent step \(i): \(f[0])")
+        }
+    }
+    Thread.sleep(forTimeInterval: 0.5)
+    try? channel.close().wait()
+    print("probe: INPUT DONE")
+    exit(0)
 } else {
     guard let saved = savedHost else {
         fputs("probe: no saved host — pair first\n", stderr); exit(64)

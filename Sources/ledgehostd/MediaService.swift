@@ -31,6 +31,8 @@ final class MediaService {
         var lastKeyframeRequest: Date = .distantPast
         var droppedAUs: Int = 0
         var resumedAUs: Int = 0
+        var translator = InputTranslator()
+        var rateLimiter = InputRateLimiter()
     }
 
     struct RunningInfo { var width: Int = 0, height: Int = 0, fps: Int = 0, mbps: Int = 0 }

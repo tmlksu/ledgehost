@@ -497,3 +497,47 @@ injection is solid and held-state release is proven).
   check: fps 60, rtt ~6 ms (frameAge reads 0 ms - the host
   clock runs slightly ahead of the device clock; noted, not a
   blocker). Input does nothing yet, as scoped: that is P1-M3.
+- 2026-11-27: P1-M3 input implemented and verified headlessly
+  on :21 with a scratch daemon (port 17460) and the probe's new
+  `input` mode. Built: helpers/ledgehost-input.c (XTest
+  injection; XTest ABI declared directly — devprefix lacks
+  XInput headers; root-window rectangle, no RandR — single-head
+  :21; pointer moves coalesced; buttons 1-7 incl. wheel click
+  accumulation 120/click milli-fractions... measured: scroll
+  clicks fire per ~1/24 frame fraction; text fast path with
+  scratch-keycode remap fallback + restore; held-state tracking
+  + release-all on op-5 and stdin EOF; 240 rec/s bucket),
+  helpers/xquery.c (X-state verification tool),
+  LedgehostCore/InputRecords.swift (op-record codec,
+  InputTranslator with CGEventFlags modifier-bitmask diffing —
+  control chars in .text become key ops), ledgehostd/
+  InputService.swift (helper lifecycle + restart backoff +
+  graceful EOF stop), SessionRegistry.injector arbitration
+  (most recent .desktop selector injects; previous injector's
+  held input released on switch), per-watcher translator +
+  InputRateLimiter, permanent shape-only kind 8 diagnostics
+  (event kind, HID usage, modifier bits — never text payloads).
+  Verification (synthetic windows only — xev/xquery, never
+  desktop content): pointer moves land at the mapped coords
+  (normalized x*(w-1)); left/right click, wheel buttons 4-7;
+  HID 0x04 -> X keycode 38 'a' via generated keymap; text
+  produces Shift_L + base keysym for capitals; modifier sync
+  wraps shifted 'A' then releases; 2-probe arbitration moves
+  injection to the newest selector; held key released on
+  disconnect. Bugs found and fixed during verification:
+  helper record parser was off by one byte (body = off+4, not
+  +5 — read the pointer kind as op -> "unknown op 0"); the
+  pairing door's 10 s deadline fired before the debug-build
+  probe finished its 600k-round pairing-key derivation (~11 s
+  CPU) — deadline raised to 30 s (wire-invisible hardening
+  bound); daemon stopped the helper with terminate() before it
+  drained the release-all record, stranding held keys — stop
+  now closes stdin (helper's own EOF path runs release_all +
+  scratch restore) and terminates only after a 2 s grace.
+  swift test: 34/34 green (10 new input tests).
+  Still to observe at the real-client acceptance: the genuine
+  client's .key vs .text split (which arrives for typed
+  characters), its modifier-arrival mode (modifiers bitmask on
+  each event vs discrete modifier keys), pointer drawn from the
+  single static kind 14, scrollGesture vs .scroll usage, and
+  event rate vs the 240/s cap.
