@@ -14,9 +14,12 @@ let package = Package(
     name: "ledgehost",
     products: [
         .library(name: "StreamProtocol", targets: ["StreamProtocol"]),
+        .executable(name: "tls-spike", targets: ["tls-spike"]),
     ],
     dependencies: [
         .package(url: "https://github.com/apple/swift-crypto.git", from: "3.5.0"),
+        .package(url: "https://github.com/apple/swift-nio.git", from: "2.70.0"),
+        .package(url: "https://github.com/apple/swift-nio-ssl.git", from: "2.27.0"),
     ],
     targets: [
         .target(
@@ -32,6 +35,18 @@ let package = Package(
             ],
             path: "Vendor/StreamProtocol",
             exclude: ["RemoteTLS.swift"]
+        ),
+        .executableTarget(
+            name: "tls-spike",
+            dependencies: [
+                "StreamProtocol",
+                .product(name: "Crypto", package: "swift-crypto"),
+                .product(name: "NIO", package: "swift-nio"),
+                .product(name: "NIOCore", package: "swift-nio"),
+                .product(name: "NIOSSL", package: "swift-nio-ssl"),
+                .product(name: "NIOTLS", package: "swift-nio"),
+            ],
+            path: "Sources/tls-spike"
         ),
         .testTarget(
             name: "StreamProtocolTests",
