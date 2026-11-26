@@ -235,3 +235,13 @@ Capture (ximagesrc, on the remote-desktop dummy display):
   it belongs with the first streaming slice in Phase 1.
 
 Still open in 0-A: playing a test encode on the iPad itself.
+
+## Progress — idle check, now with timestamps (2026-11-26)
+
+The daemon's log lines now carry timestamps (a gap found while
+trying to prove this very check). With the timestamped build, a
+client session established at 21:41:49 was still the same live
+TCP connection at 21:52:50, with client telemetry still flowing:
+the 10-minute idle criterion is now proven, not inferred. The
+client also shows a consistent pattern of one short-lived session
+immediately replaced by the real one at connect time.
