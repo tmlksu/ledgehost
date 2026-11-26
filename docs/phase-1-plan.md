@@ -404,3 +404,21 @@ injection is solid and held-state release is proven).
   idle and busy; vapostproc path lower (~49 idle, ~38 busy) —
   on this iGPU the CPU conversion wins. Also established:
   vah265lpenc cpb-size is in kilobits.
+- 2026-11-26: P1-M0 formal run on :21 at its native
+  1600x1200, spec pipelines, framerate=60/1, 10 s each
+  (fpsdisplaysink counting; "busy" = mpv looping a synthetic
+  testsrc2 clip in the session). Results:
+  idle,  (a) vapostproc→VAMemory NV12: ~48.8 fps (472
+          buffers), gst ~53 % of one core;
+  idle,  (b) videoconvert→NV12 (system memory, encoder
+          uploads): ~60.1 fps (580 buffers), gst ~51 %;
+  busy,  (a) vapostproc: ~36.5 fps (356 buffers), gst ~49 %,
+          system ~75 % busy incl. mpv;
+  busy,  (b) videoconvert: ~59.4 fps (574 buffers), gst ~54 %,
+          system ~72 %.
+  Gate outcome: capture→convert→encode sustains the full
+  60 fps at the target resolution via pipeline (b), idle and
+  busy — videoconvert is the primary conversion path on this
+  iGPU and vapostproc the measured fallback. GATE PASSES
+  (lower rate would have adjusted fps targets; a full-rate
+  path exists).
