@@ -28,13 +28,16 @@ final class LHM1ReaderTests: XCTestCase {
         // Exactly one flagged keyframe: the first AU.
         XCTAssertTrue(records[1].isKeyframe)
         XCTAssertFalse(records.dropFirst(2).contains { $0.isKeyframe })
-        // Timestamps are sane wall-clock seconds, non-decreasing.
+        // Timestamps are sane wall-clock seconds; the msdk encoder
+        // emits AUs with small reorder jitter, so each must sit within
+        // 50 ms of its predecessor while the stream as a whole advances.
         var prev = 0.0
         for r in records {
             XCTAssertGreaterThan(r.captureTimestamp, 1_700_000_000)
-            XCTAssertGreaterThanOrEqual(r.captureTimestamp, prev)
+            if prev > 0 { XCTAssertLessThanOrEqual(prev - r.captureTimestamp, 0.05) }
             prev = r.captureTimestamp
         }
+        XCTAssertGreaterThan(records.last!.captureTimestamp - records[1].captureTimestamp, 0.8)
     }
 
     func testReaderHandlesSplitFeeds() throws {

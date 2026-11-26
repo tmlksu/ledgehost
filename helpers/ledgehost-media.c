@@ -53,11 +53,10 @@ static int write_failed;
  * periodically so clock slew cannot accumulate. */
 static double rt0;
 static gint64 pts0 = -1;
-static gint64 last_pts;
+static double last_latency_ms;
 static guint n_records;
 static guint frames_this_second;
 static GstClock *pipe_clock;
-static GstClockTime pipe_base = GST_CLOCK_TIME_NONE;
 
 static double now_realtime(void)
 {
@@ -161,7 +160,7 @@ static GstFlowReturn on_sample(GstAppSink *sink, gpointer data)
     if (n_records && n_records % 300 == 0)
         rt0 += now_realtime() - (rt0 + (double)(pts - pts0) / 1e9);
     double ts = rt0 + (double)(pts - pts0) / 1e9;
-    last_pts = pts;
+    last_latency_ms = (now_realtime() - ts) * 1000.0;
     n_records++;
     frames_this_second++;
 
@@ -256,15 +255,9 @@ static gboolean on_bus(GstBus *bus, GstMessage *msg, gpointer data)
 static gboolean stats_tick(gpointer data)
 {
     (void)data;
-    double lat_ms = -1;
-    if (pipe_clock && pipe_base != GST_CLOCK_TIME_NONE) {
-        GstClockTime now = gst_clock_get_time(pipe_clock);
-        if (now > pipe_base && now - pipe_base > (GstClockTime)last_pts)
-            lat_ms = (double)(now - pipe_base - (GstClockTime)last_pts) / 1e6;
-    }
     if (frames_this_second)
         fprintf(stderr, "media: %u au/s, capture->au-out %.1f ms\n",
-                frames_this_second, lat_ms);
+                frames_this_second, last_latency_ms);
     frames_this_second = 0;
     return G_SOURCE_CONTINUE;
 }
@@ -380,7 +373,6 @@ int main(int argc, char **argv)
         return 2;
     }
     pipe_clock = gst_pipeline_get_clock(GST_PIPELINE(pipe));
-    pipe_base = gst_element_get_base_time(pipe);
     fprintf(stderr, "media: pipeline up: %s\n", pipe_str);
 
     g_main_loop_run(loop);

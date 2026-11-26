@@ -5,6 +5,7 @@ import NIOCore
 import NIOSSL
 import NIOTLS
 import StreamProtocol
+import LedgehostCore
 #if canImport(Glibc)
 import Glibc
 #endif
@@ -12,10 +13,14 @@ import Glibc
 // Logs must reach files and journals unbuffered: a pairing code or a
 // gate decision sitting in a stdio buffer helps nobody.
 setvbuf(stdout, nil, _IONBF, 0)
+// A dead helper's stdout pipe must never kill the daemon.
+signal(SIGPIPE, SIG_IGN)
 
-// ledgehostd — the Phase 0 host: identity (M2), discovery, the TLS
-// doors and the session catalog (M3). No streaming yet (Phase 1);
-// a paired device connects, gets the Desktop catalog, and can ping.
+// ledgehostd — the Phase 0 host (identity, discovery, TLS doors, the
+// session catalog) plus Phase 1 streaming (P1-M2): selectSource on the
+// desktop spawns ledgehost-media and broadcasts kind 0/1 to every
+// watcher, with byte-accounted per-session backpressure and coalesced
+// forced IDRs.
 //
 // The TLS shape is the M0.5 spike's, generalized: the verification
 // callback establishes only "P-256 peer" and the pin (SHA-256 of
@@ -75,6 +80,95 @@ final class PeerBox: @unchecked Sendable {
     var fingerprint: Data?
 }
 
+// MARK: - Sessions and the media service
+//
+// Every session handler runs on the single event loop, so the watcher
+// registry needs no locking.
+
+var settings = StreamSettings(maxFPS: 60, bitrate: 15_000_000, captureScale: 1,
+                              prioritizeSpeed: true, virtualDisplay: false,
+                              directWireless: nil, sendAudio: nil)
+
+final class SessionRegistry {
+    var sessions: [ObjectIdentifier: ConnectionHandler] = [:]
+
+    var watchers: [ConnectionHandler] { sessions.values.filter { $0.watchingDesktop } }
+
+    var maxWantedFPS: Int {
+        watchers.map { $0.watcher.wantedFPS }.max() ?? 60
+    }
+}
+let registry = SessionRegistry()
+
+let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+let eventLoop = group.next()
+
+let processEnv = ProcessInfo.processInfo.environment
+let targetDisplay = processEnv["DISPLAY"] ?? ""
+let media = MediaService(group: group,
+                         display: targetDisplay,
+                         xauthority: processEnv["XAUTHORITY"],
+                         fpsSource: { registry.maxWantedFPS })
+
+/// A small arrow PNG for the one static cursorShape (kind 14) sent on
+/// selectSource (decision 5; whether the client can draw a usable
+/// pointer from it is observed in P1-M3).
+let cursorPNG = Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAVUlEQVR4nKXQ2woAIAgD0P3/Ty96KLpoOR0EPayDBgBEMawi7KkgHMkiXJNBeEZFLkBFTEBBXCAKfYEf5BWt857gvEf2n8DyQP9EoyghXiG1TmS6LQ15ZQEO0cXuMgAAAABJRU5ErkJggg==")!
+
+func buildMessage(_ kind: StreamMessageKind, timestamp: Double, keyframe: Bool, payload: Data) -> ByteBuffer {
+    let message = StreamMessage(kind: kind, timestamp: timestamp, isKeyframe: keyframe, payload: payload)
+    var buf = ByteBufferAllocator().buffer(capacity: payload.count + StreamMessage.headerLength)
+    buf.writeBytes(message.serialized())
+    return buf
+}
+
+func wireMediaService() {
+    media.onSetsChanged = { payload in
+        var buf = buildMessage(.parameterSets, timestamp: Date().timeIntervalSince1970,
+                               keyframe: true, payload: payload)
+        // kind 0 is never dropped — a session that cannot take it must
+        // wait for the resume path's copy, not lose the sets.
+        for session in registry.watchers {
+            session.deliver(buf.readSlice(length: buf.readableBytes) ?? buf)
+        }
+    }
+    media.onFrame = { ts, au, isIDR in
+        var frameBuf = buildMessage(.frame, timestamp: ts, keyframe: isIDR, payload: au.frame)
+        for session in registry.watchers {
+            switch session.watcher.state {
+            case .live:
+                session.deliver(frameBuf.readSlice(length: frameBuf.readableBytes) ?? frameBuf)
+            case .dropping:
+                session.watcher.droppedAUs += 1
+            case .needsIDR:
+                guard isIDR else {
+                    session.watcher.droppedAUs += 1
+                    continue
+                }
+                // Resume atomically: kind 0 then the IDR, one flush.
+                if let sets = media.setsPayload {
+                    session.writeNoFlush(buildMessage(.parameterSets,
+                                                      timestamp: Date().timeIntervalSince1970,
+                                                      keyframe: true, payload: sets))
+                }
+                session.deliver(frameBuf.readSlice(length: frameBuf.readableBytes) ?? frameBuf)
+                session.watcher.state = .live
+                session.watcher.resumedAUs += 1
+                print(Log.stamp(), "ledgehostd: session \(session.label) resumed on IDR (\(session.watcher.droppedAUs) AUs dropped)")
+            }
+        }
+    }
+    media.onGiveUp = {
+        let goodbye = Wire.encode(Goodbye(reason: "quit",
+                                          message: "The desktop stream could not start on this host.",
+                                          reconnect: true))
+        for session in registry.sessions.values {
+            session.send(kind: .goodbye, payload: goodbye)
+            session.closeSoon()
+        }
+    }
+}
+
 // MARK: - Connection handling
 
 final class ConnectionHandler: ChannelInboundHandler {
@@ -94,8 +188,39 @@ final class ConnectionHandler: ChannelInboundHandler {
     private var buffer = Data()
     private var tick: RepeatedTask?
     private var deadline: Scheduled<()>?
+    private weak var channel: Channel?
+    var label = "?"
+    var watchingDesktop = false
+    var watcher = MediaService.Watcher()
 
     init(peer: PeerBox) { self.peer = peer }
+
+    var key: ObjectIdentifier { ObjectIdentifier(self) }
+    var peerFingerprint: Data? { peer.fingerprint }
+
+    /// Deliver one already-built message buffer (media fan-out).
+    func deliver(_ buf: ByteBuffer) {
+        channel?.writeAndFlush(buf, promise: nil)
+    }
+
+    func writeNoFlush(_ buf: ByteBuffer) { channel?.write(buf, promise: nil) }
+
+    func closeSoon() { channel?.close(promise: nil) }
+
+    /// Byte-accounted backpressure (decision 4): when the channel's
+    /// outbound buffer passes the high-water mark the session drops AUs;
+    /// on becoming writable it rejoins via kind 0 + the next IDR.
+    private func updateDropping() {
+        guard let channel, watchingDesktop else { return }
+        if !channel.isWritable && watcher.state == .live {
+            watcher.state = .dropping
+            print(Log.stamp(), "ledgehostd: session \(label) over the water mark — dropping AUs, forcing IDR")
+            media.requestKeyframe()
+        } else if channel.isWritable && watcher.state == .dropping {
+            watcher.state = .needsIDR
+            print(Log.stamp(), "ledgehostd: session \(label) writable again — rejoin on next IDR")
+        }
+    }
 
     func userInboundEventTriggered(context: ChannelHandlerContext, event: Any) {
         if let tlsEvent = event as? TLSUserEvent, case .handshakeCompleted(let negotiated) = tlsEvent {
@@ -148,12 +273,24 @@ final class ConnectionHandler: ChannelInboundHandler {
         }
     }
 
-    private func send(context: ChannelHandlerContext, kind: StreamMessageKind, payload: Data) {
+    private func send(context: ChannelHandlerContext, kind: StreamMessageKind, payload: Data,
+                      keyframe: Bool = false) {
         let message = StreamMessage(kind: kind, timestamp: Date().timeIntervalSince1970,
-                                    isKeyframe: false, payload: payload)
+                                    isKeyframe: keyframe, payload: payload)
         var out = context.channel.allocator.buffer(capacity: message.serialized().count)
         out.writeBytes(message.serialized())
         context.writeAndFlush(wrapOutboundOut(out), promise: nil)
+    }
+
+    /// Same, for call sites outside channel callbacks (registry fan-out
+    /// uses deliver() on already-built buffers instead).
+    func send(kind: StreamMessageKind, payload: Data, keyframe: Bool = false) {
+        guard let channel else { return }
+        var out = channel.allocator.buffer(capacity: payload.count + StreamMessage.headerLength)
+        let message = StreamMessage(kind: kind, timestamp: Date().timeIntervalSince1970,
+                                    isKeyframe: keyframe, payload: payload)
+        out.writeBytes(message.serialized())
+        channel.writeAndFlush(out, promise: nil)
     }
 
     private func handle(context: ChannelHandlerContext, kind: StreamMessageKind, payload: Data) {
@@ -175,7 +312,9 @@ final class ConnectionHandler: ChannelInboundHandler {
                 context.close(promise: nil); state = .done; return
             }
             print(Log.stamp(), "ledgehostd: hello: app \(hello.appVersion ?? "?") protocol \(hello.protocol ?? -1) device \(hello.device ?? "?") audio \(hello.audio ?? [])")
+            label = SafeText.label(hello.device ?? "?", limit: 32)
             state = .session
+            registry.sessions[key] = self
             sendCatalog(context: context)
             tick = context.eventLoop.scheduleRepeatedTask(initialDelay: .seconds(10), delay: .seconds(10)) { [weak self] _ in
                 guard let self, self.state == .session else { return }
@@ -187,7 +326,24 @@ final class ConnectionHandler: ChannelInboundHandler {
             case .ping:
                 send(context: context, kind: .pong, payload: payload)
             case .selectSource:
-                print(Log.stamp(), "ledgehostd: selectSource \(String(data: payload, encoding: .utf8) ?? "?") (streaming arrives in Phase 1)")
+                handleSelectSource(context: context, payload: payload)
+            case .viewport:
+                handleViewport(payload: payload)
+            case .keyframeRequest:
+                // At most one a second per connection (the wire rule);
+                // the service coalesces forced IDRs globally at 250 ms.
+                if Date().timeIntervalSince(watcher.lastKeyframeRequest) >= 1 {
+                    watcher.lastKeyframeRequest = Date()
+                    media.requestKeyframe()
+                }
+            case .clientStats:
+                if let stats = Wire.decode(ClientStats.self, from: payload) {
+                    print(Log.stamp(), "ledgehostd: stats \(label): fps \(stats.fps) frameAge \(stats.frameAgeMs) ms rtt \(stats.rttMs) ms")
+                }
+            case .input:
+                break   // P1-M3: input injection; never log payloads
+            case .changeSettings:
+                handleChangeSettings(context: context, payload: payload)
             case .pairingWanted:
                 print(Log.stamp(), "ledgehostd: pairingWanted on a session — ignored")
             default:
@@ -199,18 +355,108 @@ final class ConnectionHandler: ChannelInboundHandler {
         }
     }
 
-    private func sendCatalog(context: ChannelHandlerContext) {
-        let list = WindowList(macName: identity.name, windows: [], active: .desktop,
+    // MARK: selectSource / viewport / settings
+
+    private func handleSelectSource(context: ChannelHandlerContext, payload: Data) {
+        guard let source = Wire.decode(StreamSource.self, from: payload) else {
+            print(Log.stamp(), "ledgehostd: selectSource: undecodable payload — ignored")
+            return
+        }
+        switch source {
+        case .desktop:
+            print(Log.stamp(), "ledgehostd: \(label) selected the desktop")
+            if !watchingDesktop {
+                watchingDesktop = true
+                watcher = MediaService.Watcher()       // .needsIDR
+                try? channel?.setOption(ChannelOptions.writeBufferWaterMark,
+                                        value: .init(low: MediaService.highWaterBytes / 2,
+                                                     high: MediaService.highWaterBytes))
+                send(context: context, kind: .cursorShape,
+                     payload: CursorShapeBlob.encode(hotspot: CGPoint(x: 0, y: 0),
+                                                     size: CGSize(width: 16, height: 16),
+                                                     png: cursorPNG))
+                if let sets = media.setsPayload {
+                    send(context: context, kind: .parameterSets, payload: sets,
+                         keyframe: true)
+                }
+                media.watcherJoined()
+                media.requestKeyframe()
+            }
+            sendWindowList(context: context, active: .desktop)
+        case .none:
+            if watchingDesktop {
+                watchingDesktop = false
+                media.watcherLeft(hasWatchers: !registry.watchers.isEmpty)
+                print(Log.stamp(), "ledgehostd: \(label) unselected the desktop")
+            }
+            sendWindowList(context: context, active: .none)
+        case .window(let id):
+            // This host lists no windows; the client re-asserts the
+            // current source through the list.
+            print(Log.stamp(), "ledgehostd: \(label) selected window \(id) — no windows on this host")
+            sendWindowList(context: context, active: watchingDesktop ? .desktop : .none)
+        }
+    }
+
+    private func handleViewport(payload: Data) {
+        guard let v = Wire.decode(Viewport.self, from: payload) else {
+            print(Log.stamp(), "ledgehostd: viewport from \(label): undecodable — ignored")
+            return
+        }
+        if let why = ViewportBounds.refusal(v) {
+            print(Log.stamp(), "ledgehostd: viewport from \(label) refused: \(why)")
+            return
+        }
+        let wanted = min(max(v.fps ?? 60, 24), settings.maxFPS)
+        if wanted != watcher.wantedFPS {
+            watcher.wantedFPS = wanted
+            print(Log.stamp(), "ledgehostd: \(label) wants \(wanted) fps (stream max \(registry.maxWantedFPS))")
+            if registry.maxWantedFPS != media.runningInfo.fps {
+                media.restart()
+            }
+        }
+    }
+
+    private func handleChangeSettings(context: ChannelHandlerContext, payload: Data) {
+        guard let change = Wire.decode(HostSettingsChange.self, from: payload) else {
+            print(Log.stamp(), "ledgehostd: changeSettings from \(label): undecodable — ignored")
+            return
+        }
+        // Whitelist against SettingsChoices (the contract); the apply
+        // itself (live retune / pipeline restart) is P1-M5 — the change
+        // is answered now so the client's controls stay enabled.
+        if let v = change.maxFPS, SettingsChoices.maxFPS.contains(v) { settings.maxFPS = v }
+        if let v = change.bitrate, SettingsChoices.bitrate.contains(v) { settings.bitrate = v }
+        if let v = change.captureScale, SettingsChoices.captureScale.contains(v) { settings.captureScale = v }
+        if let v = change.prioritizeSpeed { settings.prioritizeSpeed = v }
+        print(Log.stamp(), "ledgehostd: \(label) changed settings: maxFPS \(settings.maxFPS) bitrate \(settings.bitrate) captureScale \(settings.captureScale) (apply is P1-M5)")
+        send(context: context, kind: .hostSettings, payload: Wire.encode(settingsState(answering: change.token)))
+    }
+
+    private func sendWindowList(context: ChannelHandlerContext, active: StreamSource) {
+        let list = WindowList(macName: identity.name, windows: [], active: active,
                               launchID: identity.launchID, hostVersion: "0.0.0-linux", protocol: 1)
         send(context: context, kind: .windowList, payload: Wire.encode(list))
-        let settings = HostSettingsState(
-            settings: StreamSettings(maxFPS: 60, bitrate: 12_000_000, captureScale: 1,
-                                     prioritizeSpeed: true, virtualDisplay: false,
-                                     directWireless: nil, sendAudio: nil),
+    }
+
+    private func settingsState(answering: Int? = nil) -> HostSettingsState {
+        HostSettingsState(
+            settings: settings,
             persistent: true, virtualDisplayAvailable: false,
             virtualDisplayNote: "virtual display is not available on this host",
-            softwareEncoder: false, sessionPaired: true)
-        send(context: context, kind: .hostSettings, payload: Wire.encode(settings))
+            softwareEncoder: false,
+            stream: media.runningInfo.fps > 0
+                ? RunningStream(width: media.runningInfo.width, height: media.runningInfo.height,
+                                fps: media.runningInfo.fps, mbps: media.runningInfo.mbps,
+                                onVirtualDisplay: false)
+                : nil,
+            answering: answering,
+            sessionPaired: true)
+    }
+
+    private func sendCatalog(context: ChannelHandlerContext) {
+        sendWindowList(context: context, active: .none)
+        send(context: context, kind: .hostSettings, payload: Wire.encode(settingsState()))
         let info = MacInfo(v: 1, macID: identity.macID, name: identity.name,
                            issuedAt: Date().timeIntervalSince1970, remoteAccess: false,
                            remotePort: port, internet: false, addresses: [])
@@ -219,9 +465,25 @@ final class ConnectionHandler: ChannelInboundHandler {
         }
     }
 
+    func channelActive(context: ChannelHandlerContext) {
+        channel = context.channel
+        label = peer.fingerprint.map { RemoteIdentityShortName($0) } ?? context.channel.remoteAddress.map { "\($0)" } ?? "?"
+        context.fireChannelActive()
+    }
+
+    func channelWritabilityChanged(context: ChannelHandlerContext) {
+        updateDropping()
+        context.fireChannelWritabilityChanged()
+    }
+
     func channelInactive(context: ChannelHandlerContext) {
         tick?.cancel()
         deadline?.cancel()
+        if watchingDesktop {
+            watchingDesktop = false
+            media.watcherLeft(hasWatchers: !registry.watchers.isEmpty)
+        }
+        registry.sessions.removeValue(forKey: key)
         context.fireChannelInactive()
     }
 
@@ -233,8 +495,24 @@ final class ConnectionHandler: ChannelInboundHandler {
 
 // MARK: - Server
 
-let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-defer { try? group.syncShutdownGracefully() }
+wireMediaService()
+defer {
+    media.shutdown()
+    try? group.syncShutdownGracefully()
+}
+
+// Live revocation: re-read the pin store every 2 s; a fingerprint that
+// disappeared loses its live sessions and any input it held.
+eventLoop.scheduleRepeatedTask(initialDelay: .seconds(2), delay: .seconds(2)) { _ in
+    pins.reload()
+    for session in registry.sessions.values {
+        if let fp = session.peerFingerprint, !pins.isPinned(fp) {
+            print(Log.stamp(), "ledgehostd: revoked pin — closing session \(session.label)")
+            session.send(kind: .goodbye, payload: Wire.encode(Goodbye(reason: "removed", reconnect: false)))
+            session.closeSoon()
+        }
+    }
+}
 
 let cert = try NIOSSLCertificate(bytes: [UInt8](identity.certificateDER), format: .der)
 let keyPEM = "-----BEGIN EC PRIVATE KEY-----\n"

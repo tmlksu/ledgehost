@@ -173,6 +173,16 @@ final class PinStore {
     }
 
     var count: Int { lock.lock(); defer { lock.unlock() }; return file.devices.count }
+
+    /// Re-read paired.json if it changed on disk (the unpair path writes
+    /// it from another process) — the live-revocation watch in main.
+    func reload() {
+        lock.lock(); defer { lock.unlock() }
+        guard let data = try? readIfExists(url),
+              let decoded = try? JSONDecoder().decode(PinFile.self, from: data),
+              decoded.version == 1 else { return }
+        file = decoded
+    }
 }
 
 /// Random bytes for our own stores (the vendored shims' fill is internal

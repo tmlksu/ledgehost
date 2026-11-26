@@ -463,3 +463,28 @@ injection is solid and held-state release is proven).
     header is 20 bytes (magic4+ver1+tag1+flags1+res1+ts8+len4);
     the first helper build wrote length over the timestamp's
     low bytes.
+- 2026-11-26: P1-M2 daemon integration done, loopback-verified
+  end-to-end with the probe: scratch identity + scratch port,
+  probe `record` selected the desktop → helper spawned on :21
+  (ximagesrc → videoconvert → msdkh265enc, the M1-verified
+  encoder), 647 kind-1 frames over ~11 s, all decode cleanly in
+  ffprobe at 1600x1200 (coded == display again). Verified on the
+  wire: kind 0 sets before frames, forced IDR on join (session
+  "resumed on IDR"), the 5 s last-watcher debounce stop, the
+  static kind 14 cursorShape, WindowList re-send with active
+  updated, kind 16 `answering` on changeSettings (whitelisted;
+  applying the values is P1-M5), kind 22 wired to repeated
+  helper failure, live pin revocation (2 s reload), SIGPIPE
+  ignored, per-session 4 MiB high-water backpressure with
+  drop→needsIDR→kind0+IDR resume, 250 ms global IDR coalescing
+  and the 1 s per-connection kind 44 throttle.
+  Measured on the real desktop: IDR 259783 B (~2 Mbit) at
+  1600x1200/60 fps/15 Mbps — well under 2×IDR < 4 MiB, so the
+  4 MiB mark governs. Helper-reported capture→AU-out ≈ 1–2 ms.
+  Two integration fixes worth noting: NIO pipe channels need a
+  POLLABLE fd on both sides (/dev/null cannot be epoll-registered
+  — a socketpair supplies the unused direction), and msdk emits
+  AUs with ~±17 ms timestamp reorder jitter (the LHM1 reader
+  and tests now tolerate it). Real-client acceptance (desktop
+  visibly moving on the iPad) still pending — it needs the user
+  and the device.
