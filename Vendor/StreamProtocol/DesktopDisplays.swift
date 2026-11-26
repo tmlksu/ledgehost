@@ -1,4 +1,7 @@
+// Linux port (ledgehost): modified from the upstream v0.6.2 file — see Vendor/VENDORED.md.
+#if canImport(CoreGraphics)
 import CoreGraphics
+#endif
 import Foundation
 
 /// The Desktop's stops: which of the Mac's displays the Desktop streams when it has more than one, and

@@ -1,8 +1,20 @@
+// Linux port (ledgehost): modified from the upstream v0.6.2 file — see Vendor/VENDORED.md.
 import Foundation
+#if canImport(Network)
 import Network
+#endif
+#if canImport(Security)
 import Security
+#endif
+#if canImport(CryptoKit)
 import CryptoKit
+#else
+import Crypto
+import SillLinuxShims
+#endif
+#if canImport(CommonCrypto)
 import CommonCrypto
+#endif
 
 // Pairing (docs/remote-access-plan.md §3.5–3.6): the typed code, the proofs both sides exchange,
 // the Bonjour recognition tag and the sill://pair link. Shared by the Mac, the device and the
@@ -36,7 +48,11 @@ public enum PairingCode {
         var digits: [Int] = []
         while digits.count < length - 1 {
             var bytes = [UInt8](repeating: 0, count: 16)
+            #if canImport(Security)
             guard SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes) == errSecSuccess else { return nil }
+            #else
+            guard SillLinuxShims.Random.fill(&bytes) else { return nil }
+            #endif
             for b in bytes where b < 250 && digits.count < length - 1 { digits.append(Int(b % 10)) }
         }
         return (digits + [checkDigit(digits)]).map(String.init).joined()
@@ -87,6 +103,7 @@ public enum PairingProof {
         var salt = Data(label.utf8)
         salt.append(macFingerprint)
         let password = Array(code.utf8)
+        #if canImport(CommonCrypto)
         var out = [UInt8](repeating: 0, count: 32)
         let status = password.withUnsafeBufferPointer { pw in
             salt.withUnsafeBytes { s in
@@ -98,6 +115,13 @@ public enum PairingProof {
             }
         }
         return status == kCCSuccess ? SymmetricKey(data: out) : nil
+        #else
+        // swift-crypto has no PBKDF2; the shim implements RFC 2898 over
+        // HMAC-SHA256 (same salt layout: label bytes + raw fingerprint).
+        guard let derived = SillLinuxShims.PBKDF2.derive(password: password, salt: salt,
+                                                         iterations: Int(rounds), keyLength: 32) else { return nil }
+        return SymmetricKey(data: derived)
+        #endif
     }
 
     /// The QR path's key: the link's secret.
@@ -151,8 +175,12 @@ public enum RecognitionTag {
         var p = [UInt8](repeating: 0, count: 6)
         if let nonce, nonce.count == 6 {
             p = [UInt8](nonce)
-        } else if SecRandomCopyBytes(kSecRandomDefault, p.count, &p) != errSecSuccess {
-            return nil
+        } else {
+            #if canImport(Security)
+            if SecRandomCopyBytes(kSecRandomDefault, p.count, &p) != errSecSuccess { return nil }
+            #else
+            if !SillLinuxShims.Random.fill(&p) { return nil }
+            #endif
         }
         var tag = Data(p)
         tag.append(mac(recognitionKey: recognitionKey, nonce: Data(p)))
@@ -208,6 +236,7 @@ public enum HomeDoorTXT {
     /// The door a received record describes, entry by entry: what a device reads. A `p` without a
     /// value (a boolean attribute, which NWTXTRecord's `dictionary` leaves out: measured
     /// 2026-09-25) reads as "1", like any value but "0", rather than as a plain door.
+    #if canImport(Network)
     public static func door(_ record: NWTXTRecord) -> Door {
         switch record.getEntry(for: key) {
         case nil: return .plain
@@ -215,6 +244,7 @@ public enum HomeDoorTXT {
         default: return .pairingRequired          // no value, an empty one, or bytes
         }
     }
+    #endif
 }
 
 /// The QR code's content, also a link another app can hand over (always behind a confirmation on
