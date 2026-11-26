@@ -662,3 +662,29 @@ injection is solid and held-state release is proven).
   desktop copy -> iPad paste, iPad copy -> desktop paste,
   and whether the genuine client sends image fields
   (ignored this generation) or stop on disconnect.
+- 2026-11-27 (packaging): ledgehostd ships as a systemd USER
+  service. deploy/ledgehost.service is a generic unit
+  (Type=exec, ExecStart=%h/.local/lib/ledgehost/ledgehostd
+  17455, Restart=on-failure 5 s, StartLimit 10/120 s,
+  NoNewPrivileges, UMask=0077, RestrictAddressFamilies
+  UNIX/INET/INET6/NETLINK, LockPersonality, ProtectSystem=
+  strict + ReadWritePaths=%h/.config/ledgehost; deliberately
+  no PrivateTmp/ProtectHome/PrivateDevices/MDWE — they break
+  the X socket, config, /dev/dri, encoder codegen).
+  scripts/install-service.sh builds release + helpers, lays
+  the three binaries into <prefix>/lib/ledgehost/ atomically
+  (tmp+mv), installs the unit, writes the site drop-in
+  (DISPLAY, XAUTHORITY, ExecStart override when prefix/port
+  differ), preserves an existing drop-in whose DISPLAY
+  differs unless --display is passed again, checks linger,
+  daemon-reloads; --enable does enable --now. Verified with
+  a scratch install (ledgehost-scratch on 17462, prefix
+  /tmp, scratch XDG_CONFIG_HOME): ProtectSystem=strict
+  SURVIVED on this host (active + serving: pair, record
+  766 frames, journalctl logs, config write under the
+  extra ReadWritePaths); second run proved idempotent;
+  drop-in DISPLAY preservation warned and kept; teardown
+  removed unit/drop-in/prefix cleanly. docs/packaging.md
+  documents install/linger/display-change/commands/
+  upgrade/uninstall and the CRD display-renumber caveat.
+  Real-service cutover is the orchestrator's step.

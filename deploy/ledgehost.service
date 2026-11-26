@@ -1,0 +1,35 @@
+# ledgehostd — systemd USER unit. Generic: no site-specific lines
+# (DISPLAY, XAUTHORITY and any path overrides live in the site's
+# drop-in, written by scripts/install-service.sh).
+#
+#   systemctl --user edit ledgehost   # adjust site.conf
+#
+[Unit]
+Description=ledgehostd — Linux host for the streaming client wire protocol
+StartLimitIntervalSec=120
+StartLimitBurst=10
+
+[Service]
+Type=exec
+ExecStart=%h/.local/lib/ledgehost/ledgehostd 17455
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=yes
+UMask=0077
+# AF_UNIX: the X socket; AF_INET/6: client sessions and Avahi;
+# AF_NETLINK: GStreamer/udev device queries.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+LockPersonality=yes
+# Whole filesystem read-only except the daemon's own config dir.
+# Requires unprivileged user namespaces; if AppArmor restricts them on
+# this host the unit will not start — remove these two lines.
+ProtectSystem=strict
+ReadWritePaths=%h/.config/ledgehost
+
+# Deliberately NOT set (each breaks a real need):
+#   PrivateTmp/ProtectHome  X socket and config live under /tmp or $HOME
+#   PrivateDevices          GStreamer/VA-API need /dev/dri
+#   MemoryDenyWriteExecute  encoder/driver JIT codegen
+
+[Install]
+WantedBy=default.target
