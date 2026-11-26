@@ -1,14 +1,18 @@
-# Phase 1 plan — the minimal streaming slice (draft)
+# Phase 1 plan — the minimal streaming slice (v2)
 
-Status: DRAFT, written 2026-11-26 after Phase 0 completed.
-Awaiting review. Nothing here is implemented yet.
+Status: v2, approved by the user 2026-11-26. Implementation
+starts with P1-M0. This version folds in the required changes
+from three independent reviews of the v1 draft (an Opus advisor
+review and two coding-model reviews, all "proceed with changes";
+review files: docs/phase-1-review-opus.md,
+docs/phase-1-review-swe2.md, docs/phase-1-review-fable.md).
 
 Goal: from the genuine client, see the host's desktop moving and
 operate it — capture → HEVC → wire → client decode, plus pointer,
 scroll and keys back. One source (the desktop), one resolution
 (the display's own), LAN only. Everything else (audio, windows as
-separate sources, virtual displays, remote access, settings that
-do something) is a later phase.
+separate sources, virtual displays, remote access) is a later
+phase.
 
 ## What Phase 0 established
 
@@ -16,32 +20,73 @@ do something) is a later phase.
   accepted by the genuine client 0.6.2 on the target machine.
 - The target's VA HEVC low-power encoder does 2266x1488 with
   ~90 fps headroom, zero reordering; a test encode plays on the
-  iPad. ximagesrc moves full-resolution frames at negligible CPU;
-  the 25 fps seen in 0-A was the measurement display's own cap.
+  iPad. ximagesrc moves full-resolution frames at negligible CPU.
+- Correction to the Phase 0 record: the ~25 fps seen in 0-A was
+  the unconstrained-caps fixation default, not a display cap —
+  with explicit framerate=60/1 caps the same display sustains
+  ≥60 buffers/s. The seat display's real capture rate is still
+  unmeasured; that is gate P1-M0 below.
 - The client sends, per session: selectSource (kind 6), viewport
   (kind 9, with wanted fps), input (kind 8), clientStats
   (kind 12, 1 Hz), keyframeRequest (kind 44).
 
-## The wire contract for media (from the upstream sources)
+## The wire contract for media and settings (upstream sources)
 
 - kind 0 parameterSets: `ParameterSets.encoded()` — nalLen(1),
   count(1), then per set length(2, BE) + bytes. nalLen is 4.
   Sent before the frames it describes, and again whenever the
-  sets change. Marked isKeyframe in the header.
+  sets change. Marked isKeyframe in the header. A session must
+  never be resumed on a keyframe whose sets it has not received
+  (see backpressure).
 - kind 1 frame: one HEVC access unit, NALs length-prefixed
   (hvcC style, 4-byte lengths), parameter-set NALs NOT in the AU
   (they live in kind 0). Header carries the capture timestamp
-  (seconds) and the isKeyframe flag.
-- StreamSource is `.desktop` for this phase. When a session's
-  selectSource changes, the host re-sends the WindowList
-  (kind 2) with `active` updated.
+  (seconds) and the isKeyframe flag. Frame payload cap is
+  `maxFramePayload` (32 MiB, StreamMessage.swift:123).
+- StreamSource is `.desktop` for this phase. Subscription state
+  is per session: `.desktop` subscribes, `.none` unsubscribes
+  (the host stops sending video to that session and re-sends the
+  WindowList with `active: .none`), `.window(id)` is logged and
+  ignored with the list's `active` re-asserted (this host lists
+  no windows). When a session's selectSource changes, the host
+  re-sends the WindowList (kind 2) with `active` updated.
 - InputEvent positions are fractions of the video frame; the
-  host maps them onto the source rectangle. Cases: pointer
-  (move/leftDown/leftUp/rightDown/rightUp), scroll, text,
-  scrollGesture, key (USB HID usage + down + modifiers).
+  host maps them onto the source rectangle (decision 6). Cases:
+  pointer (move/leftDown/leftUp/rightDown/rightUp), scroll,
+  text, scrollGesture, key (USB HID usage + down + modifiers
+  bitmask at CGEventFlags positions: shift 1<<17, control
+  1<<18, alt/option 1<<19, command 1<<20 — Input.swift:33-34).
+  The text cases `"\n"`, `"\t"`, `"\u{8}"` are delivered as the
+  matching keys, not typed as characters (Input.swift:22-24).
 - ClientStats (kind 12) reports the client's received fps,
   frameAgeMs (host encode timestamp → device receipt) and RTT —
   the phase's latency evidence, logged by the daemon at 1 Hz.
+- keyframeRequest (kind 44): the host honours at most one per
+  second per connection (StreamMessage.swift:87-93). The
+  client's own recovery resends only after ~4 s without a
+  keyframe, so drop recovery must not wait for it (decision 4).
+- Viewport (kind 9) must pass `ViewportBounds.refusal`
+  (Viewport.swift:32-37 — upstream lost a host to unvalidated
+  doubles reaching an Int conversion). `wantedFPS` clamps to
+  24…maxFPS; nil means 60. Running fps is the max across
+  sessions.
+- changeSettings (HostSettings): every decodable change is
+  answered to that device alone with a kind 16 whose
+  `answering` equals the change's `token`
+  (HostSettings.swift:239-242). Values are whitelisted against
+  `SettingsChoices`: maxFPS {60,120}, bitrate the quality
+  presets {4M, 8M, 15M, 25M, 40M}, captureScale {1,2}
+  (HostSettings.swift:297-311). Fields this host does not
+  implement keep their advertised values in the answer — a
+  silent drop reads as a refusal the client cannot explain
+  (HostSettings.swift:26-28). `stream` (RunningStream) is
+  populated once the pipeline runs. `persistent` stays false
+  until changes are actually persisted.
+- `StreamSettings.bitrate` is per 60 fps: the encoder target
+  is `bitrate × runningFps / 60` (HostSettings.swift:67-68).
+  The catalog therefore advertises a preset value, 15 Mbps
+  (the v1 draft's 12 Mbps is a non-preset "Custom" the client
+  can only display read-only).
 
 ## Architecture
 
@@ -49,107 +94,297 @@ do something) is a later phase.
 flowchart LR
     subgraph daemon["ledgehostd (Swift, exists)"]
         SESS["session handling<br/>selectSource / viewport / stats"]
-        BUS["frame broadcast bus<br/>bounded per-session queue"]
-        MAP["input mapping<br/>fractions → pixels"]
+        BUS["frame broadcast bus<br/>NIO watermark + byte-bounded drop"]
+        MAP["input mapping + validation<br/>fractions → pixels"]
     end
     subgraph media["ledgehost-media (new, C + GStreamer)"]
-        CAP["ximagesrc"] --> CONV["videoconvert<br/>(vapostproc if needed)"]
+        CAP["ximagesrc<br/>show-pointer=false"] --> CONV["vapostproc<br/>(videoconvert fallback)"]
         CONV --> ENC["vah265lpenc"]
-        ENC --> PARSE["h265parse → AU-aligned"]
+        ENC --> PARSE["h265parse → AU-aligned Annex B"]
     end
     subgraph input["ledgehost-input (new, C + X11/XTest)"]
-        XT["XTest injection"]
+        XT["XTest injection<br/>HID table, held-state tracking"]
     end
-    PARSE -->|"framed pipe: P (sets) / F (AU)"| BUS
+    PARSE -->|"framed pipe (spec below)"| BUS
     BUS -->|"kind 0 / kind 1"| CLIENT["genuine client"]
-    CLIENT -->|"kind 8 input"| SESS --> MAP -->|"line protocol"| XT
-    SESS -->|"stdin: KEYFRAME / SET_BITRATE"| media
+    CLIENT -->|"kind 8 input"| SESS --> MAP -->|"length-prefixed records"| XT
+    SESS -->|"stdin: KEYFRAME / SET_BITRATE / STOP"| media
 ```
 
-Decisions baked into this draft (review points, not conclusions):
+Both helper pipes are carried on the daemon's event loop via
+NIO pipe channels — no blocking read or write anywhere on the
+loop — and the daemon ignores SIGPIPE (a dead helper must never
+kill the daemon). Session channels get a WriteBufferWaterMark;
+the drop decision reads `isWritable` / writability changes, not
+a daemon-side queue in front of NIO's unbounded outbound buffer.
+
+## Decisions (v2)
 
 1. Media is a separate C process, per the Phase −1 architecture
-   (core in Swift, media out-of-process). The daemon spawns it,
-   reads framed access units from its stdout, and controls it
-   over stdin (KEYFRAME, SET_BITRATE, STOP). AU alignment is
-   solved by h265parse inside the helper; the daemon never scans
-   a raw byte stream. A gst-launch child was rejected: it cannot
-   force a keyframe on demand.
-2. The Annex B → wire conversion (strip VPS/SPS/PPS into kind 0,
-   4-byte length-prefix the rest) lives in the daemon, unit-tested
-   against captured encoder output.
-3. One pipeline, broadcast to every session watching the desktop
-   (upstream's model). A session that selects the desktop gets
-   the cached parameter sets at once, then joins at the next
-   keyframe; the daemon forces a keyframe on join.
-4. Backpressure: per-session bounded queue. A session that falls
-   behind drops access units until the next keyframe (a dropped
-   AU corrupts the GOP anyway; the client's keyframeRequest and
-   the 1 s GOP bound the damage). No session may block the bus.
+   (core in Swift, media out-of-process). The daemon spawns it
+   by absolute path with a minimal, sanitised environment
+   (DISPLAY, XAUTHORITY, an explicit GStreamer environment with
+   GST_DEBUG and GST_PLUGIN_* unset), reads framed records from
+   its stdout, and controls it over stdin (KEYFRAME,
+   SET_BITRATE, STOP). AU alignment is solved by h265parse
+   inside the helper (stream-format=byte-stream, alignment=au);
+   the daemon scans start codes only within one AU buffer,
+   never across a raw byte stream. A gst-launch child was
+   rejected: it cannot force a keyframe on demand.
+2. The Annex B → wire conversion (strip VPS/SPS/PPS into
+   kind 0, 4-byte length-prefix the rest; strip AUD and filler
+   NALs) lives in the daemon, unit-tested against recorded
+   encoder output. The daemon seeds its kind 0 cache from the
+   helper's sets record and re-sends kind 0 whenever the sets
+   change byte-wise, and before any IDR a session resumes on.
+3. One pipeline, broadcast to every session watching the
+   desktop (upstream's model). A session that selects the
+   desktop gets the cached parameter sets at once and a forced
+   keyframe. Pipeline lifecycle: start on the first subscriber;
+   stop 5 s after the last watcher leaves (the client opens a
+   short-lived session at connect that is immediately replaced;
+   the debounce prevents start/stop flapping). Helpers
+   self-terminate on stdin EOF or stdout EPIPE and are spawned
+   with PR_SET_PDEATHSIG; the daemon reaps children, restarts a
+   dead media helper with backoff, and after repeated failures
+   sends kind 22 goodbye (reconnect: true, with a human
+   message) instead of leaving a frozen picture.
+4. Backpressure is byte-accounted per session on the NIO
+   channel: high-water mark = max(4 MiB, 2× the IDR size
+   measured in P1-M1). A session over the mark drops access
+   units until it resumes; on entering the dropping state the
+   daemon forces an IDR (coalesced, see below), and on resume
+   it enqueues kind 0 (current sets) then the IDR, atomically.
+   Kind 0 is never dropped. Enter/leave-dropping is logged per
+   session with counts so P1-M4 can show convergence.
+   Keyframe discipline: forced IDRs are coalesced globally
+   (≥250 ms apart) and kind 44 is honoured at most once per
+   second per connection.
 5. The cursor stays OUT of the video (upstream's model: the
-   client draws its own pointer). kind 14/26 (cursor shape and
-   host pointer position) are NOT in this phase; the trade-off
-   is that a pointer moved by someone at the host is invisible
-   on the device. Flagged for review.
-6. The daemon takes its X display from its environment
-   (DISPLAY), like any X client. Developing against an accessible
-   remote-desktop session display is fine; running inside the
-   seat session (user service) is packaging, a later step. No
-   display number is hardcoded anywhere.
+   client draws its own pointer). This requires the explicit
+   ximagesrc property `show-pointer=false` (its default is
+   true). kind 26 (host pointer position) is not in this
+   phase; the trade-off is that a pointer moved by someone at
+   the host is invisible on the device. As a cheap probe, the
+   daemon sends one static default cursorShape (kind 14) on
+   selectSource — whether the client draws a usable pointer
+   with only that is observed in P1-M3.
+6. The source rectangle is defined once — the primary RandR
+   output's CRTC rectangle (the root window when single-head) —
+   and shared by capture and input mapping:
+   `x_px = rect.x + clamp(x,0,1) × (rect.w − 1)`. A RandR
+   change (resolution or layout) restarts the pipeline with
+   fresh parameter sets. The daemon never opens an X connection
+   itself; DISPLAY/XAUTHORITY from its environment are passed
+   only to the helpers. No display number is hardcoded.
 7. Frame timestamps are the capture wall-clock (seconds, the
    same epoch the header already uses), stamped by the helper
-   from the buffer PTS plus its start wall-clock.
-8. Input injection maps HID usages to X keycodes with the
-   evdev convention (keycode = usage + 8) for the main block,
-   and types text by the temporary-remap trick for arbitrary
-   Unicode. Scroll becomes XTest wheel buttons (4–7), with
-   scrollGesture phases mapped to press/release of a virtual
-   smooth-scroll where feasible — best effort in this phase.
+   from the buffer PTS plus its start wall-clock, re-anchored
+   periodically so NTP slew cannot drift it. This deliberately
+   makes frameAgeMs include capture+convert+encode; the helper
+   logs its own capture→AU-out latency once per second so the
+   budget can be decomposed. The host must be NTP-synced
+   (checked in P1-M4) or frameAge is meaningless.
+8. Keyboard input uses a real table: USB HID usage → Linux
+   KEY_* code (the kernel hid-input.c `hid_keyboard[]` table),
+   then X keycode = KEY_* + 8. (v1's "usage + 8" was wrong:
+   HID 0x04 'a' is KEY_A 30 → X keycode 38, not 12.) The table
+   covers letters, digits, Return/Escape/Backspace/Tab, the
+   nav cluster, F-keys, keypad, and modifier usages
+   0xE0–0xE7, and is unit-tested without X. The `modifiers`
+   bitmask is applied by the daemon: it diffs the bitmask per
+   event and emits explicit modifier press/release key ops
+   around the key op (command → Super). Text typing uses a
+   fast path — look the character's keysym up in the current
+   keymap (with shift level) and only use the temporary-remap
+   trick for characters absent from the layout; the scratch
+   keycode is reset to NoSymbol on helper startup and exit
+   (a crash mid-remap must not leave the server keymap altered).
+9. Held input is tracked per session (keys, buttons,
+   modifiers). On session end, helper restart, or daemon
+   shutdown, everything that session held is released. A stuck
+   key on the real desktop — with X autorepeat running it —
+   is the failure this prevents.
+10. Input is validated before it reaches XTest, and the helper
+    re-validates (defence in depth): fractions clamped to
+    [0,1]; scroll deltas bounded and accumulated so sub-click
+    fractions are not lost; pointer moves coalesced to the
+    latest; text capped at 4096 characters per event; at most
+    240 input events per second per session; unknown HID
+    usages dropped; keycodes checked against the server's
+    min/max. Only a session that has selected the desktop may
+    inject.
+11. Encoder configuration is explicit: `b-frames=0`,
+    `key-int-max=300` (a 5 s safety net at 60 fps — recovery
+    is by forced IDR, not by GOP; a 1 s GOP would put an
+    IDR-sized spike on the wire every second),
+    `rate-control=cbr` with a small VBV (cpb-size ≈ 2 frames
+    of bits; property units verified in P1-M1), and a
+    `queue leaky=downstream max-size-buffers=1` before the
+    encoder so a lagging encoder drops raw frames, never
+    encoded AUs. The helper raises its stdout pipe buffer
+    (≈1 MiB) so an IDR is not dozens of read wakeups. The
+    broadcast fan-out builds each kind 0/1 message once as a
+    ByteBuffer and writes the same buffer to every session.
+12. Live retune semantics: bitrate is a property write if the
+    encoder accepts it in PLAYING (verified in P1-M5), else a
+    pipeline restart; fps changes are caps renegotiations and
+    always restart the pipeline (upstream's own rule,
+    Viewport.swift:20-22), resuming via the standard rejoin
+    path (cached sets + forced IDR).
+
+## IPC specifications
+
+Media helper → daemon (stdout; framed records, nothing else may
+ever reach stdout — all logging is stderr):
+
+- Header: magic "LHM1" (4), version (1) = 1, tag (1):
+  1 = access unit, 2 = parameter sets; flags (1): bit 0 =
+  keyframe; reserved (1); capture timestamp (8, Double,
+  wall-clock seconds); payload length (4, BE) ≤ 32 MiB.
+- A sets record's payload is the VPS/SPS/PPS as Annex B,
+  concatenated. An AU record's payload is one Annex B access
+  unit, parameter sets included if the encoder emitted them
+  (the daemon's converter separates them).
+- The daemon validates magic, version, tag, length and a sane
+  timestamp (within 24 h of now); any violation kills and
+  restarts the helper rather than allocating on faith.
+
+Daemon → input helper (stdin; length-prefixed binary records —
+a line protocol cannot carry typed text, which legitimately
+contains "\n"):
+
+- Record: length (4, BE, ≤ 64 KiB) + body. Body: op (1) +
+  fields. Ops: 1 pointer (kind (1), x (4), y (4) — fractions
+  ×1e6, clamped), 2 scroll (dx (4), dy (4) — ×1e6), 3 key
+  (HID usage (2, BE), down (1)), 4 text (UTF-8 bytes, the
+  record length bounds it), 5 release-all (the session ended;
+  release everything it held), 6 reset (drop all state).
+  Modifier application arrives as ordinary op-3 records for
+  usages 0xE0–0xE7, sequenced by the daemon.
+- The helper rejects unknown ops and out-of-range fields, and
+  tracks held state per the single input stream (the daemon
+  serialises sessions; arbitration is the daemon's: only the
+  session that most recently selected the desktop injects —
+  refined if real use shows a conflict).
 
 ## Milestones
 
-- P1-M1 Converter + proof offline. The Annex B → wire converter
-  with unit tests; the probe gains a "record" mode that saves a
-  session's kind 0/1 payloads, reassembles them, and the result
-  must decode cleanly in ffprobe with the expected frame count.
+- P1-M0 Seat-capture gate (measurement, before integration).
+  On the seat session, run both candidate pipelines at the
+  seat's native resolution with framerate=60/1 for 10 s each —
+  (a) ximagesrc use-damage=false show-pointer=false →
+  vapostproc → NV12 (VAMemory) → vah265lpenc → fakesink
+  sync=false, (b) the same with videoconvert in place of
+  vapostproc — and record sustained fps and CPU, once on an
+  idle desktop and once with a busy desktop (scrolling
+  content). Record the numbers in this document's progress
+  log. A total capture failure stops the phase here; a lower
+  rate adjusts the fps targets, it does not block the slice.
+- P1-M1 Converter + proof offline. The Annex B → wire
+  converter with unit tests; the keymap table with unit tests;
+  the probe gains a "record" mode that saves a session's
+  kind 0/1 payloads (with header flags and timestamps),
+  reassembles them, and the result must decode cleanly in
+  ffprobe with the expected frame count. Fixtures come from a
+  synthetic source (videotestsrc through the real helper
+  pipeline) — never recordings of a real desktop — and are
+  committed under Tests/. In this milestone also verify:
+  GstForceKeyUnit on the running pipeline produces a real IDR
+  (check the NAL types of the next AU), the IDR size at the
+  catalog settings (feeds decision 4's high-water mark), and
+  coded vs display width (the conformance crop) in ffprobe.
 - P1-M2 Media helper + daemon integration. selectSource
-  (.desktop) starts the pipeline; parameter sets and frames flow.
-  Acceptance (real client): the desktop is visible and visibly
-  moving (a clock's seconds, a window dragged at the host).
-- P1-M3 Input helper. Pointer move/click, wheel scroll, keys and
-  text reach the host desktop. Acceptance (real client): from
-  the iPad, click a button and type into a text editor on the
-  host, with the result visible in the stream.
-- P1-M4 Join and recovery. keyframeRequest forces an IDR;
-  reconnect mid-stream yields a picture within ~1 s; a 10-minute
-  stream stays up; ClientStats logged (fps / frameAge / RTT).
-- P1-M5 Settings that are already on the wire. The pipeline runs
-  at the catalog's bitrate and the client's wanted fps (kind 9);
-  changeSettings for bitrate/fps retunes the encoder live
-  (property writes, no pipeline restart) and re-sends kind 16.
+  (.desktop) starts the pipeline; parameter sets and frames
+  flow; keyframe-on-join and kind 44 are honoured here (not
+  deferred). Acceptance (real client): the desktop is visible
+  and visibly moving (a clock's seconds, a window dragged at
+  the host).
+- P1-M3 Input helper. First, log raw kind 8 without injecting
+  and record what the genuine client actually sends (the
+  .key/.text split with keyRepeat unset, whether modifiers
+  arrive as their own key events, as the bitmask, or both) —
+  the mapping in decision 8 is then confirmed against
+  observation. Then pointer move/click, wheel scroll, keys
+  and text reach the host desktop. Acceptance (real client):
+  from the iPad, click a button and type into a text editor
+  on the host, with the result visible in the stream. Also
+  observed here: whether the client draws a pointer with only
+  the static kind 14 from decision 5. Documented behaviour:
+  a paired device can type into the seat's unlock dialog
+  (upstream permits the same); the WindowList `locked` flag
+  is set from the X screensaver state if that query proves
+  trivial, else it is a recorded follow-up.
+- P1-M4 Join and recovery. Reconnect mid-stream yields a
+  picture within ~1 s; a second client joining mid-stream
+  gets cached kind 0 + a forced IDR; a deliberately throttled
+  session shows the drop policy converging (enter/leave logs);
+  a 10-minute stream stays up; ClientStats logged
+  (fps / frameAge / RTT). Latency budget (provisional targets,
+  LAN): capture→AU-out p50 ≤ 20 ms; frameAgeMs p50 ≤ 50 ms,
+  max ≤ 120 ms; sustained client fps ≥ 58 at 60 wanted.
+- P1-M5 Settings that act. changeSettings per the contract
+  above (answering token, whitelist, per-field policy,
+  RunningStream populated); bitrate retunes live if the
+  encoder allows, fps retunes by pipeline restart; the
+  encoder target follows the per-60-fps scaling.
+
+## Security notes
+
+- A pin is now equivalent to the logged-in user's session:
+  pairing grants full keyboard/mouse control of the real
+  desktop, including typing the unlock password. The plan
+  states this as a decision, not an accident. `paired.json`
+  and its directory are kept 0600/0700.
+- Live revocation: the daemon watches the pin store; when a
+  fingerprint disappears, its live sessions are closed and
+  their held input released (Phase 0 unpairing worked by
+  restart only because nothing could inject yet).
+- Logging hygiene: device names pass through SafeText.label
+  before logging (Hello.device today is logged raw), and
+  typed text and key events are never logged — the daemon
+  must not become a keystroke logger on its own input path.
+- The daemon binds 0.0.0.0 for LAN discovery parity; it logs
+  the interfaces it listens on at startup, and deployment on
+  an untrusted network requires a firewall rule (documented
+  when packaging lands).
+- Helpers run as the session user, never root, with the
+  minimal environment of decision 1.
 
 ## Non-goals for this phase
 
 Audio (kind 43), per-window sources, thumbnails, clipboard,
-gestures (kind 28), cursor shape/pointer kinds (14/26), virtual
-displays, resize of the host display to the panel, Remote Access,
-multi-client differences (one pipeline is shared; per-client
-fps takes the max, as upstream does).
+gestures (kind 28), host pointer position (kind 26), virtual
+displays, resize of the host display to the panel, Remote
+Access, advertising keyRepeat (a later step, once key
+injection is solid and held-state release is proven).
 
 ## Risks and open questions
 
-- videoconvert (BGRA → NV12) cost at 2266x1488/60 on the target's
-  CPU; vapostproc is the fallback if it eats the frame budget.
-  Measured in P1-M2, not assumed.
-- The seat display's capture rate (0-A could only measure a
-  25 Hz-capped remote display). If the seat session also caps
-  low, the phase still proves the slice; fps tuning follows.
-- Dropping AUs mid-GOP: how does the genuine client actually
-  behave (freeze until IDR? artefacts? immediate
-  keyframeRequest)? Observed in P1-M4 against the real client,
-  not guessed.
+- The seat display's capture path is the phase's highest-risk
+  unknown and is gated first (P1-M0) instead of being
+  discovered during integration.
+- Dropping AUs mid-GOP: how the genuine client actually
+  behaves (freeze until IDR? artefacts? its own
+  keyframeRequest?) is observed in P1-M4 by throttling, not
+  guessed.
+- Whether the client uses the header timestamp only for stats
+  or also for presentation pacing: if pacing, host clock skew
+  changes latency, not just the reported number. Observable in
+  P1-M4 by skewing the host clock +200 ms.
+- Whether the client's decoder accepts the low-delay "B"
+  pictures on the live VideoToolbox path (Phase 0 proved MP4
+  playback in Safari, which is not the same path). Decided by
+  P1-M2's first picture.
 - Text typing via key remapping races with the user's real
-  keyboard layout; acceptable for a slice, revisited if it bites.
+  keyboard layout; the fast path in decision 8 narrows it;
+  acceptable for a slice, revisited if it bites.
 - The media helper is the first C in the project: build wiring
   (a Makefile invoked from the package build, or a standalone
   build script) must stay as boring as the rest of the repo.
+
+## Progress log
+
+- 2026-11-26: v1 draft written; three reviews received (all
+  proceed-with-changes); v2 written folding in every required
+  change; user approved v2 and implementation start.
