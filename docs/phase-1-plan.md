@@ -488,3 +488,12 @@ injection is solid and held-state release is proven).
   and tests now tolerate it). Real-client acceptance (desktop
   visibly moving on the iPad) still pending — it needs the user
   and the device.
+- 2026-11-26 (night): P1-M2 real-client acceptance PASSED. The
+  new daemon (real identity, port 17455, DISPLAY :21) replaced
+  the Phase 0 daemon after a config backup; the genuine client
+  connected with its saved entry, selected the desktop, and
+  displayed the :21 desktop; a seconds clock placed on the
+  desktop ticked visibly on the iPad. ClientStats during the
+  check: fps 60, rtt ~6 ms (frameAge reads 0 ms - the host
+  clock runs slightly ahead of the device clock; noted, not a
+  blocker). Input does nothing yet, as scoped: that is P1-M3.
