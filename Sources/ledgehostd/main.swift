@@ -5,6 +5,13 @@ import NIOCore
 import NIOSSL
 import NIOTLS
 import StreamProtocol
+#if canImport(Glibc)
+import Glibc
+#endif
+
+// Logs must reach files and journals unbuffered: a pairing code or a
+// gate decision sitting in a stdio buffer helps nobody.
+setvbuf(stdout, nil, _IONBF, 0)
 
 // ledgehostd — the Phase 0 host: identity (M2), discovery, the TLS
 // doors and the session catalog (M3). No streaming yet (Phase 1);

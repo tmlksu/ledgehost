@@ -5,6 +5,13 @@ import NIOCore
 import NIOSSL
 import NIOTLS
 import StreamProtocol
+#if canImport(Glibc)
+import Glibc
+#endif
+
+// Logs must reach files and journals unbuffered: a pairing code or a
+// gate decision sitting in a stdio buffer helps nobody.
+setvbuf(stdout, nil, _IONBF, 0)
 
 // M0.5 spike (see docs/phase-0-plan.md): a throwaway TLS server that
 // retires the two riskiest unknowns against the real client before

@@ -14,7 +14,7 @@ work="$(mktemp -d)"
 trap 'kill ${HOSTPID:-} 2>/dev/null; rm -rf "$work"' EXIT
 
 cd "$root"
-swift build --product ledgehostd --product ledgehost-probe 2>&1 | tail -1
+swift build --product ledgehostd 2>&1 | tail -1; swift build --product ledgehost-probe 2>&1 | tail -1
 bin="$root/.build/debug"
 
 wait_log() {  # file, pattern, seconds
