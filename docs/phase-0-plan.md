@@ -17,6 +17,21 @@ Progress (2026-11-26):
   Remaining for M0.5: the same checks against the real device client
   on the LAN, plus Avahi discovery (needs the target machine at home
   and the user present).
+- M2/M3 done at loopback level: `ledgehostd` (identity persisted
+  atomically with 0700/0600 permissions, Avahi subprocess advertising
+  p=1 + a fresh recognition tag, both TLS doors, the pairing window —
+  one code, five tries, key derived once per rotation — and the
+  session catalog: WindowList with the Desktop active, HostSettings,
+  signed MacInfo, ping/pong, a 10-second tick) and `ledgehost-probe`,
+  the reference client. Verified: pairing by typed code (proofs both
+  ways), session PASS (catalog decodes, the signed MacInfo verifies
+  against the TLS pin, pong), a wrong code refused with triesLeft 4,
+  an unpaired session closed at the gate, and a host restart keeping
+  the same fingerprint with reconnection and no re-pairing.
+  Regression: `scripts/loopback-e2e.sh`. Release build: full startup
+  including the 600,000-round derivation is about 2 s (debug: ~25 s).
+  Remaining for Phase 0: 0-A on the target machine and the device
+  criteria below, on the home LAN with the user present.
 All 10 required changes from that review are incorporated below.
 Background and diagrams: `explainer.md`. Phase -1 evidence:
 `phase-minus-1-report.md`.
