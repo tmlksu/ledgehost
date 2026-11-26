@@ -483,14 +483,50 @@ final class ConnectionHandler: ChannelInboundHandler {
             print(Log.stamp(), "ledgehostd: changeSettings from \(label): undecodable — ignored")
             return
         }
-        // Whitelist against SettingsChoices (the contract); the apply
-        // itself (live retune / pipeline restart) is P1-M5 — the change
-        // is answered now so the client's controls stay enabled.
-        if let v = change.maxFPS, SettingsChoices.maxFPS.contains(v) { settings.maxFPS = v }
-        if let v = change.bitrate, SettingsChoices.bitrate.contains(v) { settings.bitrate = v }
-        if let v = change.captureScale, SettingsChoices.captureScale.contains(v) { settings.captureScale = v }
-        if let v = change.prioritizeSpeed { settings.prioritizeSpeed = v }
-        print(Log.stamp(), "ledgehostd: \(label) changed settings: maxFPS \(settings.maxFPS) bitrate \(settings.bitrate) captureScale \(settings.captureScale) (apply is P1-M5)")
+        // Whitelist against SettingsChoices (the contract). Fields this
+        // host cannot honour keep their advertised values in the answer:
+        // virtualDisplay is advertised unavailable, and directWireless /
+        // sendAudio are advertised absent (nil), so a device showing
+        // those rows never sends them; if one arrives anyway it is
+        // ignored and the answer still carries the advertised value.
+        var applied: [String] = []
+        if let v = change.maxFPS, SettingsChoices.maxFPS.contains(v) {
+            if settings.maxFPS != v {
+                settings.maxFPS = v
+                applied.append("maxFPS=\(v)")
+            }
+        }
+        if let v = change.bitrate, SettingsChoices.bitrate.contains(v) {
+            if settings.bitrate != v {
+                settings.bitrate = v
+                applied.append("bitrate=\(v)")
+            }
+        }
+        if let v = change.captureScale, SettingsChoices.captureScale.contains(v) {
+            if settings.captureScale != v {
+                settings.captureScale = v
+                applied.append("captureScale=\(v) (no effect on X capture)")
+            }
+        }
+        if let v = change.prioritizeSpeed {
+            settings.prioritizeSpeed = v
+            applied.append("prioritizeSpeed=\(v)")
+        }
+        var ignored: [String] = []
+        if change.virtualDisplay != nil { ignored.append("virtualDisplay (unavailable on this host)") }
+        if change.directWireless != nil { ignored.append("directWireless (not a setting here)") }
+        if change.sendAudio != nil { ignored.append("sendAudio (no audio on this host)") }
+        // Apply: bitrate retunes the encoder live (decision 12); a new
+        // fps ceiling re-clamps each watcher's rate and restarts the
+        // pipeline via the standard kind 0 + IDR rejoin path.
+        if let v = change.bitrate, SettingsChoices.bitrate.contains(v) {
+            media.setBitrate(v)
+        }
+        if applied.contains(where: { $0.hasPrefix("maxFPS") }) {
+            for w in registry.watchers { w.watcher.wantedFPS = min(w.watcher.wantedFPS, settings.maxFPS) }
+            if registry.maxWantedFPS != media.runningInfo.fps { media.restart() }
+        }
+        print(Log.stamp(), "ledgehostd: \(label) changed settings: \(applied.isEmpty ? "none applied" : applied.joined(separator: " "))\(ignored.isEmpty ? "" : " — ignored: \(ignored.joined(separator: ", "))")")
         send(context: context, kind: .hostSettings, payload: Wire.encode(settingsState(answering: change.token)))
     }
 
@@ -503,7 +539,9 @@ final class ConnectionHandler: ChannelInboundHandler {
     private func settingsState(answering: Int? = nil) -> HostSettingsState {
         HostSettingsState(
             settings: settings,
-            persistent: true, virtualDisplayAvailable: false,
+            // Settings live in memory only — a daemon restart returns to
+            // compiled defaults, so the client must not mark them saved.
+            persistent: false, virtualDisplayAvailable: false,
             virtualDisplayNote: "virtual display is not available on this host",
             softwareEncoder: false,
             stream: media.runningInfo.fps > 0

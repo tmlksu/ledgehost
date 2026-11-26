@@ -574,3 +574,24 @@ injection is solid and held-state release is proven).
   • Clock: timedatectl reports "System clock synchronized:
     yes, NTP active" — the earlier frameAge=0 ms on the iPad
     remains a device-clock offset (host runs ahead), not drift.
+- 2026-11-27: P1-M5 settings that act — audited the M2
+  changeSettings path against the contract and completed it:
+  answering token present (settingsState(answering:
+  change.token)); whitelist against SettingsChoices for
+  maxFPS/bitrate/captureScale (only real changes applied);
+  virtualDisplay/directWireless/sendAudio changes ignored and
+  logged by name with advertised values preserved in answers;
+  persistent corrected to false (in-memory settings revert to
+  compiled defaults on restart); RunningStream populated while
+  streaming. Bitrate apply: MediaService.setBitrate writes
+  SET_BITRATE to the helper -> g_object_set on msdkh265enc's
+  PLAYING-mutable bitrate — VERIFIED live via read-back
+  ("bitrate now 4000/40000 kbps") and recorded output
+  (~25 Mbps at 4M/15M vs ~72 Mbps at the 40M target on
+  high-entropy content; the encoder floor bounds the low end
+  on saturated content). fps apply: settings.maxFPS re-clamps
+  watchers' wantedFPS; a changed stream max triggers
+  media.restart() (decision 12) — VERIFIED: "restarting
+  pipeline (fps now 120)" then "pipeline up ...
+  framerate=120/1", reverted to 60 after; watchers rejoin via
+  kind 0 + IDR.

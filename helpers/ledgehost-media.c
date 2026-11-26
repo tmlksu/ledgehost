@@ -219,7 +219,10 @@ static gboolean on_stdin(gint fd, GIOCondition cond, gpointer data)
             g_main_loop_quit(loop);
             return G_SOURCE_REMOVE;
         } else if (sscanf(p, "SET_BITRATE %llu", &v) == 1) {
+            guint now = 0;
             g_object_set(encoder, "bitrate", (guint)(v / 1000), NULL);
+            g_object_get(encoder, "bitrate", &now, NULL);
+            fprintf(stderr, "media: bitrate now %u kbps\n", now);
         } else if (*p) {
             fprintf(stderr, "media: unknown command '%s'\n", p);
         }

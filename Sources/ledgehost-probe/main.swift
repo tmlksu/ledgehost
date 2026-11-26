@@ -429,6 +429,15 @@ if args.mode == "pair" {
         case "stats":  ev = nil
             ; send(channel, kind: .clientStats, payload: Wire.encode(
                 ClientStats(fps: 60, frameAgeMs: 0, rttMs: 0, device: "ledgehost-probe")))
+        case "bitrate": ev = nil
+            ; send(channel, kind: .changeSettings, payload: Wire.encode(
+                HostSettingsChange(token: i + 1, bitrate: Int(num(f[safe: 1] ?? "15000000")))))
+        case "fps": ev = nil
+            ; send(channel, kind: .changeSettings, payload: Wire.encode(
+                HostSettingsChange(token: i + 1, maxFPS: Int(num(f[safe: 1] ?? "60")))))
+        case "viewport": ev = nil
+            ; send(channel, kind: .viewport, payload: Wire.encode(
+                Viewport(width: 1600, height: 1200, scale: 1, fps: Int(num(f[safe: 1] ?? "60")))))
         case "sleep":  ev = nil; Thread.sleep(forTimeInterval: num(f[safe: 1] ?? "1"))
         default:
             print("probe: unknown script step '\(f[0])'"); ev = nil

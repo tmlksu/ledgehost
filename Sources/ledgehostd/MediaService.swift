@@ -327,6 +327,17 @@ final class MediaService {
         buf.writeString("KEYFRAME\n")
         inChannel.writeAndFlush(buf, promise: nil)
     }
+
+    /// Live encoder retune (decision 12): msdkh265enc accepts the
+    /// bitrate property mid-stream — `stream.mbps` reflects the new
+    /// target immediately; no restart needed.
+    func setBitrate(_ bps: Int) {
+        guard let inChannel else { return }
+        var buf = inChannel.allocator.buffer(capacity: 32)
+        buf.writeString("SET_BITRATE \(bps)\n")
+        inChannel.writeAndFlush(buf, promise: nil)
+        runningInfo.mbps = Int((Double(bps) * Double(runningInfo.fps) / 60 / 1e6).rounded())
+    }
 }
 
 /// Reads framed records off the helper's stdout.
