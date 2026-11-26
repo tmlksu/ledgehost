@@ -1,6 +1,22 @@
 # Phase 0 Plan — ledgehost
 
 Status: reviewed by Opus on 2026-11-26 — verdict "proceed, with changes".
+
+Progress (2026-11-26):
+- M1 done: pristine import + Linux patch series; the vendored module
+  builds on Linux and the golden tests pass 11/11 (upstream pairing
+  vectors incl. the 600,000-round code key, RFC 7914 PBKDF2 vectors,
+  certificate and SignedMacInfo round trips).
+- M0.5 spike built (`Sources/tls-spike`) and loopback-verified with
+  openssl s_client: P-256 client cert accepted and its fingerprint
+  logged; the post-handshake ALPN gate passes sill-pair/1 and closes
+  sill/1 (no pin registered) and no-ALPN connections; an RSA client
+  certificate fails the handshake. SPKI parity confirmed three ways:
+  BoringSSL's SPKI bytes and openssl's SPKI bytes hash to the same
+  fingerprint the vendored layout produces (91 bytes).
+  Remaining for M0.5: the same checks against the real device client
+  on the LAN, plus Avahi discovery (needs the target machine at home
+  and the user present).
 All 10 required changes from that review are incorporated below.
 Background and diagrams: `explainer.md`. Phase -1 evidence:
 `phase-minus-1-report.md`.
