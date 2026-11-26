@@ -170,3 +170,22 @@ rejected (resumption coverage).
 
 Streaming/capture integration (Phase 1), window-unit streaming and
 the virtual monitor as a feature, audio, menus, clipboard polish.
+
+## Progress — real-device check on the target machine (2026-11-26)
+
+The daemon was run on the target machine (Alder Lake-N, Ubuntu
+24.04, Xfce) and the genuine App Store client (0.6.2, iPad Air)
+was used as the judge:
+
+- Pairing by 12-digit code succeeded; the pin was stored.
+- The catalog (WindowList, HostSettings, signed MacInfo) was
+  accepted; the session stayed up and client input events flowed.
+- After a daemon restart the fingerprint and Mac ID were
+  unchanged, the pairing was retained, and the client reconnected
+  on its own with no code.
+
+Open residuals: the client's first attempt resolved the host to a
+stale address on the LAN (a neighbour address that does not answer);
+connecting by the correct address worked. Bonjour list behaviour
+needs one more look. The 10-minute idle check and the unpair
+display remain to be observed.
