@@ -189,3 +189,25 @@ stale address on the LAN (a neighbour address that does not answer);
 connecting by the correct address worked. Bonjour list behaviour
 needs one more look. The 10-minute idle check and the unpair
 display remain to be observed.
+
+## Progress — 0-A read-only checks on the target machine (2026-11-26)
+
+- Driver: intel-media-va-driver-non-free 26.3.5 (iHD).
+- VA-API: HEVC Main and Main10 both expose EncSliceLP (low-power
+  encode) in addition to EncSlice.
+- HuC: kernel log shows the HuC firmware authenticated for all
+  workloads; GuC submission enabled.
+- ffmpeg/ffprobe are already installed. Still needed for the real
+  encode test and the capture-cost measurement (apt, needs sudo):
+  gstreamer1.0-tools, gstreamer1.0-plugins-base,
+  gstreamer1.0-plugins-good (ximagesrc), gstreamer1.0-plugins-bad
+  (the `va` plugin with vah265lpenc).
+
+## Note — the stale-address incident (2026-11-26)
+
+The client's first pairing attempt targeted a neighbour address
+that does not answer ARP; the host's real LAN address worked. A
+second machine on the same LAN resolves the host name correctly
+to the real address, and the host itself owns no such address, so
+the stale record lived on the client side. If it recurs, deleting
+and re-adding the host entry on the client is the first remedy.
