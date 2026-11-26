@@ -270,9 +270,13 @@ contains "\n"):
 
 ## Milestones
 
-- P1-M0 Seat-capture gate (measurement, before integration).
-  On the seat session, run both candidate pipelines at the
-  seat's native resolution with framerate=60/1 for 10 s each —
+- P1-M0 Capture gate (measurement, before integration).
+  On the target desktop session (see the progress log: the
+  target machine is headless, its :0 is a lightdm greeter with
+  no user session, and the user designated the :21 remote
+  desktop session, 1600x1200, as the desktop this phase
+  mirrors), run both candidate pipelines at that session's
+  native resolution with framerate=60/1 for 10 s each —
   (a) ximagesrc use-damage=false show-pointer=false →
   vapostproc → NV12 (VAMemory) → vah265lpenc → fakesink
   sync=false, (b) the same with videoconvert in place of
@@ -388,3 +392,15 @@ injection is solid and held-state release is proven).
 - 2026-11-26: v1 draft written; three reviews received (all
   proceed-with-changes); v2 written folding in every required
   change; user approved v2 and implementation start.
+- 2026-11-26 (later): P1-M0 first attempt stopped the phase
+  per its own rule — the assumed seat session does not exist:
+  :0 is a lightdm greeter (no user login since boot), every
+  physical output is disconnected (headless machine), and the
+  greeter's cookie is root-only. The user designated the :21
+  remote-desktop Xfce session (1600x1200, the desktop actually
+  used on this machine) as the target desktop; the gate
+  reruns there. Provisional numbers from that session at
+  1600x1200 (10 s each): videoconvert path ~60 fps sustained
+  idle and busy; vapostproc path lower (~49 idle, ~38 busy) —
+  on this iGPU the CPU conversion wins. Also established:
+  vah265lpenc cpb-size is in kilobits.
