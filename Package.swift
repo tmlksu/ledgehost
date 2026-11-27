@@ -54,6 +54,7 @@ let package = Package(
             name: "LedgehostCore",
             dependencies: [
                 "StreamProtocol",
+                .product(name: "Crypto", package: "swift-crypto"),
             ],
             path: "Sources/LedgehostCore"
         ),

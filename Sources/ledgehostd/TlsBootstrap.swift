@@ -14,18 +14,11 @@ import LedgehostCore
 // handshake in ConnectionHandler, and no application decoder touches
 // bytes before the gate passes.
 
-/// DER head of a P-256 SubjectPublicKeyInfo. Mirrors the probe's copy —
-/// the fingerprint rule must not drift (audit R4); the shared constant
-/// lives in LedgehostCore (PeerFingerprint.spkiHead) once item R-3 lands.
-let p256SPKIHead: [UInt8] = [
-    0x30, 0x59, 0x30, 0x13, 0x06, 0x07, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x02, 0x01,
-    0x06, 0x08, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x03, 0x01, 0x07, 0x03, 0x42, 0x00,
-]
-
+/// The pin rule is shared with the probe (PeerFingerprint in
+/// LedgehostCore, audit R4/R-3); this is only the NIOSSL glue.
 func peerFingerprint(_ certificate: NIOSSLCertificate) -> Data? {
-    guard let spki = try? certificate.extractPublicKey().toSPKIBytes(), spki.count == 91,
-          [UInt8](spki.prefix(p256SPKIHead.count)) == p256SPKIHead else { return nil }
-    return Data(SHA256.hash(data: spki))
+    guard let spki = try? certificate.extractPublicKey().toSPKIBytes() else { return nil }
+    return PeerFingerprint.ofSPKI([UInt8](spki))
 }
 
 /// The handshake's carry from the TLS callback to the session handler:
@@ -37,10 +30,8 @@ final class PeerBox: @unchecked Sendable {
 /// TLS 1.3, our certificate only, both doors' ALPNs.
 func serverTLSContext(identity: HostIdentity) throws -> NIOSSLContext {
     let cert = try NIOSSLCertificate(bytes: [UInt8](identity.certificateDER), format: .der)
-    let keyPEM = "-----BEGIN EC PRIVATE KEY-----\n"
-        + identity.privateKey.derRepresentation.base64EncodedString()
-        + "\n-----END EC PRIVATE KEY-----\n"
-    let privateKey = try NIOSSLPrivateKey(bytes: [UInt8](keyPEM.utf8), format: .pem)
+    let privateKey = try NIOSSLPrivateKey(
+        bytes: [UInt8](PeerFingerprint.privateKeyPEM(identity.privateKey).utf8), format: .pem)
 
     var tlsConfig = TLSConfiguration.makeServerConfiguration(
         certificateChain: [.certificate(cert)],

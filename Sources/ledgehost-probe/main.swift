@@ -78,16 +78,6 @@ guard ["pair", "connect", "record", "input", "clipboard"].contains(args.mode) el
 
 // MARK: - Probe identity and saved host
 
-func probeConfigDirectory() -> URL {
-    let base: URL
-    if let xdg = ProcessInfo.processInfo.environment["XDG_CONFIG_HOME"], !xdg.isEmpty {
-        base = URL(fileURLWithPath: xdg)
-    } else {
-        base = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".config")
-    }
-    return base.appendingPathComponent("ledgehost-probe")
-}
-
 struct ProbeIdentityFile: Codable { var keyX963: String }
 struct SavedHost: Codable {
     var fingerprint: String   // base64url
@@ -96,9 +86,10 @@ struct SavedHost: Codable {
     var name: String
 }
 
-let dir = probeConfigDirectory()
-try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true,
-                                         attributes: [.posixPermissions: 0o700])
+// configDirectory/ensureDirectory/atomicWrite are the daemon's own
+// store rules (LedgehostCore, audit R4/R-3).
+let dir = configDirectory("ledgehost-probe")
+try? ensureDirectory(dir)
 let identityURL = dir.appendingPathComponent("identity.json")
 let deviceKey: P256.Signing.PrivateKey
 if let data = try? Data(contentsOf: identityURL),
@@ -109,8 +100,7 @@ if let data = try? Data(contentsOf: identityURL),
 } else {
     deviceKey = P256.Signing.PrivateKey()
     let file = ProbeIdentityFile(keyX963: deviceKey.x963Representation.base64EncodedString())
-    try? JSONEncoder().encode(file).write(to: identityURL)
-    try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: identityURL.path)
+    try? atomicWrite(JSONEncoder().encode(file), to: identityURL)
 }
 let deviceFingerprint = SPKI.fingerprint(of: deviceKey)
 print("probe: device fingerprint \(Base64URL.encode(deviceFingerprint))")
@@ -123,11 +113,6 @@ if let data = try? Data(contentsOf: savedHostURL) {
 
 // MARK: - TLS client
 
-let p256SPKIHead: [UInt8] = [
-    0x30, 0x59, 0x30, 0x13, 0x06, 0x07, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x02, 0x01,
-    0x06, 0x08, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x03, 0x01, 0x07, 0x03, 0x42, 0x00,
-]
-
 final class HostBox: @unchecked Sendable { var fingerprint: Data? }
 
 func makeClientContext(alpn: String, hostBox: HostBox) throws -> NIOSSLContext {
@@ -135,10 +120,8 @@ func makeClientContext(alpn: String, hostBox: HostBox) throws -> NIOSSLContext {
     // vendored code) as its client identity.
     let der = SelfSignedCertificate.make(key: deviceKey)!
     let cert = try NIOSSLCertificate(bytes: [UInt8](der), format: .der)
-    let keyPEM = "-----BEGIN EC PRIVATE KEY-----\n"
-        + deviceKey.derRepresentation.base64EncodedString()
-        + "\n-----END EC PRIVATE KEY-----\n"
-    let key = try NIOSSLPrivateKey(bytes: [UInt8](keyPEM.utf8), format: .pem)
+    let key = try NIOSSLPrivateKey(
+        bytes: [UInt8](PeerFingerprint.privateKeyPEM(deviceKey).utf8), format: .pem)
     var config = TLSConfiguration.makeClientConfiguration()
     config.minimumTLSVersion = .tlsv13
     config.maximumTLSVersion = .tlsv13
@@ -196,12 +179,12 @@ func connect(alpn: String, hostBox: HostBox, collector: Collector) throws -> Cha
     let context = try makeClientContext(alpn: alpn, hostBox: hostBox)
     let callback: NIOSSLCustomVerificationCallback = { certs, promise in
         guard let first = certs.first,
-              let spki = try? first.extractPublicKey().toSPKIBytes(), spki.count == 91,
-              [UInt8](spki.prefix(p256SPKIHead.count)) == p256SPKIHead else {
+              let spki = try? first.extractPublicKey().toSPKIBytes(),
+              let fp = PeerFingerprint.ofSPKI([UInt8](spki)) else {
             promise.succeed(.failed)
             return
         }
-        hostBox.fingerprint = Data(SHA256.hash(data: spki))
+        hostBox.fingerprint = fp
         promise.succeed(.certificateVerified)
     }
     return try ClientBootstrap(group: group)
@@ -267,8 +250,7 @@ if args.mode == "pair" {
     }
     let saved = SavedHost(fingerprint: Base64URL.encode(hostFP), macID: macID,
                           recognitionKey: rk, name: result.name ?? "")
-    try JSONEncoder().encode(saved).write(to: savedHostURL)
-    try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: savedHostURL.path)
+    try atomicWrite(JSONEncoder().encode(saved), to: savedHostURL)
     print("probe: PAIRED with \(saved.name) (\(macID)); pin saved")
     try? channel.close().wait()
 } else if args.mode == "record" {
