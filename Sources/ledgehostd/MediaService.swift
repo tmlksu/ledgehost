@@ -10,12 +10,11 @@ import Glibc
 // MediaService — the media helper's lifecycle and the kind 0/1
 // broadcast (phase-1-plan.md decisions 1–4, 6, 7, 11).
 //
-// One pipeline broadcasts to every session watching the desktop. The
-// helper is spawned by absolute path with a minimal environment
-// (DISPLAY, XAUTHORITY, PATH, HOME — every GST_* variable unset), its
-// stdout/stdin ride NIO pipe channels on the daemon's event loop, and
-// it dies on our death (PR_SET_PDEATHSIG in the helper), on stdin EOF,
-// or on stdout EPIPE.
+// One pipeline broadcasts to every session watching the desktop. Spawn
+// plumbing lives in HelperSupervisor (audit R2/R-5); this file keeps
+// the media POLICY: give up after 5 restarts, STOP stdin command,
+// terminate immediately on stop, [1,2,5,10,30] backoff via
+// RestartBackoff.
 
 final class MediaService {
     /// What a session needs to see next, in order.
@@ -37,25 +36,19 @@ final class MediaService {
 
     struct RunningInfo { var width: Int = 0, height: Int = 0, fps: Int = 0, mbps: Int = 0 }
 
-    private let group: EventLoopGroup
     private let loop: EventLoop
-    private let display: String
-    private let xauthority: String?
     private let fpsSource: () -> Int      // max wanted fps across sessions
+    private let supervisor: HelperSupervisor
 
-    private var helperProcess: Process?
-    private var outChannel: Channel?      // helper stdout → us
-    private var inChannel: Channel?       // us → helper stdin
     private var reader = MediaRecordReader()
     private var running = false
     private var stopTask: Scheduled<Void>?
-    private var restarts = 0
-    private var lastRestart: Date = .distantPast
+    private var backoff = RestartBackoff()
     private var lastForcedIDR: Date = .distantPast
     /// Global pipeline-restart debounce (audit S7): viewport and
     /// changeSettings storms could otherwise churn the encoder
     /// continuously — at most one restart per window, latest wins.
-    /// (Distinct from lastRestart, which backs crash-loop backoff.)
+    /// (Distinct from backoff, which throttles crash-loops.)
     private var pendingRestart: Scheduled<Void>?
     private var lastRequestedRestart: Date = .distantPast
     private static let restartDebounce: TimeInterval = 3
@@ -70,15 +63,33 @@ final class MediaService {
     /// kind 0 is never dropped; this is where a session stops counting.
     static let watermark = ChannelOptions.writeBufferWaterMark
 
+    /// A helper that cannot stay up after this many tries gives up:
+    /// the daemon sends kind 22 goodbye (reconnect: true) to every
+    /// watcher (media policy — input restarts indefinitely).
+    private static let maxRestarts = 5
+
     init(group: EventLoopGroup,
          display: String,
          xauthority: String?,
          fpsSource: @escaping () -> Int) {
-        self.group = group
         self.loop = group.next()
-        self.display = display
-        self.xauthority = xauthority
         self.fpsSource = fpsSource
+        supervisor = HelperSupervisor(
+            loop: loop,
+            display: display,
+            xauthority: xauthority,
+            spec: .init(tag: "media",
+                        name: "ledgehost-media",
+                        systemPath: "/usr/bin/ledgehost-media",
+                        arguments: { ["--source", "x11",
+                                      "--fps", String(fpsSource()),
+                                      "--bitrate", "15000000"] },
+                        stopCommand: "STOP\n",
+                        stopGrace: 0))
+        supervisor.onStdoutData = { [weak self] data in self?.feed(data) }
+        supervisor.onStdoutEOF = { [weak self] in self?.helperEOF() }
+        supervisor.onDied = { [weak self] status in self?.helperExited(status: status) }
+        supervisor.onAttachFailed = { [weak self] in self?.helperFailed() }
     }
 
     /// A settings change that cannot retune live (today: fps) restarts
@@ -137,125 +148,19 @@ final class MediaService {
 
     func shutdown() { stop(restart: false) }
 
-    private static let mediaHelperPaths: [String] = {
-        var paths: [String] = []
-        if let exe = Bundle.main.executableURL {
-            paths.append(exe.deletingLastPathComponent().appendingPathComponent("ledgehost-media").path)
-        }
-        paths.append(FileManager.default.currentDirectoryPath + "/bin/ledgehost-media")
-        paths.append("/usr/bin/ledgehost-media")
-        return paths
-    }()
-
-    private static func helperURL() -> URL? {
-        mediaHelperPaths.lazy.map { URL(fileURLWithPath: $0) }
-            .first { FileManager.default.isExecutableFile(atPath: $0.path) }
-    }
-
     private func start() {
-        guard let url = Self.helperURL() else {
-            print(Log.stamp(), "ledgehostd: media: ledgehost-media not found (looked next to the executable, then ./bin, /usr/bin)")
-            helperFailed(); return
-        }
-        let process = Process()
-        process.executableURL = url
-        process.arguments = ["--source", "x11",
-                             "--fps", String(fpsSource()),
-                             "--bitrate", "15000000"]
-        var env: [String: String] = ["DISPLAY": display,
-                                     "PATH": "/usr/bin:/bin",
-                                     "HOME": NSHomeDirectory()]
-        if let xauthority { env["XAUTHORITY"] = xauthority }
-        process.environment = env
-        let outPipe = Pipe(), inPipe = Pipe(), errPipe = Pipe()
-        process.standardOutput = outPipe
-        process.standardInput = inPipe
-        process.standardError = errPipe
         reader = MediaRecordReader()
-        do { try process.run() } catch {
-            print(Log.stamp(), "ledgehostd: media: spawn failed: \(error)")
-            helperFailed(); return
-        }
-        helperProcess = process
+        guard supervisor.start() else { helperFailed(); return }
         running = true
         runningInfo = RunningInfo(width: 0, height: 0, fps: fpsSource(), mbps: 15)
-        outPipe.fileHandleForReading.readabilityHandler = nil
-        let outFD = dup(outPipe.fileHandleForReading.fileDescriptor)
-        let inFD = dup(inPipe.fileHandleForWriting.fileDescriptor)
-        attachPipes(outFD: outFD, inFD: inFD)
-        // The helper logs to stderr; relay it line-by-line into our log.
-        errPipe.fileHandleForReading.readabilityHandler = { [weak self] fh in
-            let data = fh.availableData
-            guard !data.isEmpty, let self else { return }
-            for line in String(decoding: data, as: UTF8.self).split(separator: "\n") {
-                print(Log.stamp(), "ledgehostd: media:", line)
-            }
-        }
-        process.terminationHandler = { [weak self] p in
-            self?.loop.execute { self?.helperExited(status: p.terminationStatus) }
-        }
-        print(Log.stamp(), "ledgehostd: media: pipeline starting (pid \(process.processIdentifier), fps \(fpsSource()), :\(display) capture)")
-    }
-
-    private func attachPipes(outFD: Int32, inFD: Int32) {
-        // The pipe channel needs a pollable descriptor on BOTH sides
-        // (/dev/null cannot be epoll-registered): a socketpair supplies
-        // the direction the helper doesn't use.
-        var dummy: (read: Int32, write: Int32) = (-1, -1)
-        var pair: [Int32] = [-1, -1]
-        if socketpair(AF_UNIX, Int32(SOCK_STREAM.rawValue), 0, &pair) == 0 {
-            dummy = (pair[0], pair[1])
-        } else {
-            print(Log.stamp(), "ledgehostd: media: socketpair failed — \(String(cString: strerror(errno)))")
-            close(outFD); close(inFD); helperFailed(); return
-        }
-        let handler = HelperOutputHandler(service: self)
-        NIOPipeBootstrap(group: loop)
-            .channelOption(ChannelOptions.allowRemoteHalfClosure, value: true)
-            .channelInitializer { channel in channel.pipeline.addHandler(handler) }
-            .takingOwnershipOfDescriptors(input: outFD, output: dummy.write)
-            .whenComplete { [weak self] result in
-                guard let self else { return }
-                switch result {
-                case .failure(let error):
-                    print(Log.stamp(), "ledgehostd: media: stdout pipe channel failed: \(error)")
-                    close(inFD); close(dummy.read)
-                    self.helperFailed()
-                case .success(let out):
-                    self.outChannel = out
-                    NIOPipeBootstrap(group: self.loop)
-                        .channelOption(ChannelOptions.allowRemoteHalfClosure, value: true)
-                        .takingOwnershipOfDescriptors(input: dummy.read, output: inFD)
-                        .whenComplete { [weak self] result in
-                            guard let self else { return }
-                            switch result {
-                            case .failure(let error):
-                                print(Log.stamp(), "ledgehostd: media: stdin pipe channel failed: \(error)")
-                                self.helperFailed()
-                            case .success(let inCh):
-                                self.inChannel = inCh
-                            }
-                        }
-                }
-            }
+        print(Log.stamp(), "ledgehostd: media: pipeline starting (fps \(fpsSource()))")
     }
 
     private func stop(restart: Bool) {
         running = false
-        helperProcess?.terminationHandler = nil
-        if let inChannel {
-            inChannel.eventLoop.execute {
-                var buf = inChannel.allocator.buffer(capacity: 5)
-                buf.writeString("STOP\n")
-                inChannel.writeAndFlush(buf).whenComplete { _ in inChannel.close(promise: nil) }
-            }
-        }
-        outChannel?.close(promise: nil)
-        outChannel = nil; inChannel = nil
-        if let p = helperProcess, p.isRunning { p.terminate() }
-        helperProcess = nil
+        supervisor.stop()
         setsPayload = nil
-        if !restart { restarts = 0 }
+        if !restart { backoff.reset() }
     }
 
     private func helperExited(status: Int32) {
@@ -266,16 +171,13 @@ final class MediaService {
 
     private func helperFailed() {
         stop(restart: true)
-        let now = Date()
-        restarts = now.timeIntervalSince(lastRestart) > 60 ? 1 : restarts + 1
-        lastRestart = now
-        if restarts > 5 {
-            print(Log.stamp(), "ledgehostd: media: helper failed \(restarts) times — goodbye to watchers")
+        let delay = backoff.nextDelay()
+        if backoff.attempts > Self.maxRestarts {
+            print(Log.stamp(), "ledgehostd: media: helper failed \(backoff.attempts) times — goodbye to watchers")
             onGiveUp?()
             return
         }
-        let delay: TimeInterval = [1, 2, 5, 10, 30][min(restarts - 1, 4)]
-        print(Log.stamp(), "ledgehostd: media: restart \(restarts) in \(Int(delay)) s")
+        print(Log.stamp(), "ledgehostd: media: restart \(backoff.attempts) in \(Int(delay)) s")
         loop.scheduleTask(in: .milliseconds(Int64(delay * 1000))) { [weak self] in self?.start() }
     }
 
@@ -348,45 +250,14 @@ final class MediaService {
             return
         }
         lastForcedIDR = now
-        guard let inChannel else { return }
-        var buf = inChannel.allocator.buffer(capacity: 9)
-        buf.writeString("KEYFRAME\n")
-        inChannel.writeAndFlush(buf, promise: nil)
+        supervisor.send(command: "KEYFRAME\n")
     }
 
     /// Live encoder retune (decision 12): msdkh265enc accepts the
     /// bitrate property mid-stream — `stream.mbps` reflects the new
     /// target immediately; no restart needed.
     func setBitrate(_ bps: Int) {
-        guard let inChannel else { return }
-        var buf = inChannel.allocator.buffer(capacity: 32)
-        buf.writeString("SET_BITRATE \(bps)\n")
-        inChannel.writeAndFlush(buf, promise: nil)
+        supervisor.send(command: "SET_BITRATE \(bps)\n")
         runningInfo.mbps = Int((Double(bps) * Double(runningInfo.fps) / 60 / 1e6).rounded())
-    }
-}
-
-/// Reads framed records off the helper's stdout.
-private final class HelperOutputHandler: ChannelInboundHandler {
-    typealias InboundIn = ByteBuffer
-    private weak var service: MediaService?
-
-    init(service: MediaService) { self.service = service }
-
-    func channelRead(context: ChannelHandlerContext, data: NIOAny) {
-        var buf = unwrapInboundIn(data)
-        if let bytes = buf.readBytes(length: buf.readableBytes) {
-            service?.feed(Data(bytes))
-        }
-    }
-
-    func channelInactive(context: ChannelHandlerContext) {
-        service?.helperEOF()
-        context.fireChannelInactive()
-    }
-
-    func errorCaught(context: ChannelHandlerContext, error: Error) {
-        print(Log.stamp(), "ledgehostd: media: helper channel error \(error)")
-        context.close(promise: nil)
     }
 }

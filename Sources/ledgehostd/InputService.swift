@@ -12,34 +12,37 @@ import Glibc
 // session that most recently selected the desktop injects; on session
 // end, helper restart or daemon shutdown its held input is released
 // (op 5), and the helper itself releases everything on exit.
+//
+// Spawn plumbing lives in HelperSupervisor (audit R2/R-5); the input
+// POLICY stays here: restarts are unbounded (the helper must come back
+// whenever watchers exist), and stop() gives the helper a 2 s window
+// to run its release-all exit path before terminate.
 
 final class InputService {
     let loop: EventLoop
-    private let display: String
-    private let xauthority: String?
+    private let supervisor: HelperSupervisor
 
-    private var process: Process?
-    private var channel: Channel?         // us → helper stdin
-    private var outChannel: Channel?      // helper stdout → us
     var onClipboard: ((String) -> Void)?  // a foreign client's text
     private var running = false
-    private var restarts = 0
-    private var lastRestart: Date = .distantPast
+    private var backoff = RestartBackoff()
+    private var outputBuffer = Data()
 
     init(group: EventLoopGroup, display: String, xauthority: String?) {
         self.loop = group.next()
-        self.display = display
-        self.xauthority = xauthority
-    }
-
-    private static func helperURL() -> URL? {
-        var paths: [String] = []
-        if let exe = Bundle.main.executableURL {
-            paths.append(exe.deletingLastPathComponent().appendingPathComponent("ledgehost-input").path)
-        }
-        paths.append(FileManager.default.currentDirectoryPath + "/bin/ledgehost-input")
-        return paths.lazy.map { URL(fileURLWithPath: $0) }
-            .first { FileManager.default.isExecutableFile(atPath: $0.path) }
+        supervisor = HelperSupervisor(
+            loop: loop,
+            display: display,
+            xauthority: xauthority,
+            spec: .init(tag: "input",
+                        name: "ledgehost-input",
+                        extraEnvironment: {
+                            ProcessInfo.processInfo.environment["LH_CLIP_DEBUG"] != nil
+                                ? ["LH_CLIP_DEBUG": "1"] : [:]
+                        },
+                        stopGrace: 2))
+        supervisor.onStdoutData = { [weak self] data in self?.feed(data) }
+        supervisor.onDied = { [weak self] _ in self?.failed() }
+        supervisor.onAttachFailed = { [weak self] in self?.failed() }
     }
 
     /// Called when the first desktop watcher appears / the last leaves:
@@ -52,117 +55,30 @@ final class InputService {
     func shutdown() { stop() }
 
     private func start() {
-        guard let url = Self.helperURL() else {
-            print(Log.stamp(), "ledgehostd: input: ledgehost-input not found")
-            return
-        }
-        let p = Process()
-        p.executableURL = url
-        var env: [String: String] = ["DISPLAY": display, "PATH": "/usr/bin:/bin",
-                                     "HOME": NSHomeDirectory()]
-        if let xauthority { env["XAUTHORITY"] = xauthority }
-        if ProcessInfo.processInfo.environment["LH_CLIP_DEBUG"] != nil {
-            env["LH_CLIP_DEBUG"] = "1"
-        }
-        p.environment = env
-        let inPipe = Pipe(), outPipe = Pipe(), errPipe = Pipe()
-        p.standardInput = inPipe
-        p.standardOutput = outPipe
-        p.standardError = errPipe
-        do { try p.run() } catch {
-            print(Log.stamp(), "ledgehostd: input: spawn failed: \(error)")
-            return
-        }
-        process = p
+        guard supervisor.start() else { return }
         running = true
-        let inFD = dup(inPipe.fileHandleForWriting.fileDescriptor)
-        let outFD = dup(outPipe.fileHandleForReading.fileDescriptor)
-        var pair: [Int32] = [-1, -1]
-        if socketpair(AF_UNIX, Int32(SOCK_STREAM.rawValue), 0, &pair) != 0 {
-            close(inFD); close(outFD); failed(); return
-        }
-        NIOPipeBootstrap(group: loop)
-            .channelOption(ChannelOptions.allowRemoteHalfClosure, value: true)
-            .takingOwnershipOfDescriptors(input: pair[0], output: inFD)
-            .whenComplete { [weak self] result in
-                switch result {
-                case .success(let ch): self?.channel = ch; close(pair[1])
-                case .failure(let e):
-                    print(Log.stamp(), "ledgehostd: input: pipe channel failed: \(e)")
-                    close(pair[1]); self?.failed()
-                }
-            }
-        var outPair: [Int32] = [-1, -1]
-        if socketpair(AF_UNIX, Int32(SOCK_STREAM.rawValue), 0, &outPair) != 0 {
-            close(outFD); failed(); return
-        }
-        NIOPipeBootstrap(group: loop)
-            .channelOption(ChannelOptions.allowRemoteHalfClosure, value: true)
-            .takingOwnershipOfDescriptors(input: outFD, output: outPair[0])
-            .whenComplete { [weak self] result in
-                switch result {
-                case .success(let ch):
-                    self?.outChannel = ch
-                    close(outPair[1])
-                    _ = try? ch.pipeline.addHandler(InputOutputHandler(service: self))
-                case .failure(let e):
-                    print(Log.stamp(), "ledgehostd: input: output pipe failed: \(e)")
-                    close(outPair[1]); self?.failed()
-                }
-            }
-        errPipe.fileHandleForReading.readabilityHandler = { fh in
-            let data = fh.availableData
-            guard !data.isEmpty else { return }
-            for line in String(decoding: data, as: UTF8.self).split(separator: "\n") {
-                print(Log.stamp(), "ledgehostd: input:", line)
-            }
-        }
-        p.terminationHandler = { [weak self] _ in
-            self?.loop.execute { self?.failed() }
-        }
-        print(Log.stamp(), "ledgehostd: input: helper started (pid \(p.processIdentifier))")
     }
 
     private func stop() {
         running = false
-        let p = process
-        channel?.close(promise: nil)         // stdin EOF → helper releases held state itself
-        channel = nil
-        outChannel?.close(promise: nil)
-        outChannel = nil
-        process = nil
-        // SIGKILL/SIGTERM before the helper drains stdin would strand
-        // held keys (observed: stuck keycode 38). Give the graceful EOF
-        // exit — which runs release_all + scratch-keycode restore — a
-        // short window, then terminate whatever is still alive.
-        if let p, p.isRunning {
-            p.terminationHandler = nil
-            loop.scheduleTask(in: .seconds(2)) { [weak p] in
-                if let p, p.isRunning { p.terminate() }
-            }
-        }
+        supervisor.stop()      // 2 s grace: release-all runs on EOF exit
     }
 
     /// Helper died: it released all held input on the way out; restart
-    /// with the same backoff as the media helper (decision 3 applies
-    /// to both helpers).
+    /// with the shared [1,2,5,10,30] backoff — but forever (input
+    /// policy: the helper must return while watchers exist, media's
+    /// 5-strike give-up does not apply here).
     private func failed() {
         guard running else { return }
         stop()
-        let now = Date()
-        restarts = now.timeIntervalSince(lastRestart) > 60 ? 1 : restarts + 1
-        lastRestart = now
-        let delay: TimeInterval = [1, 2, 5, 10, 30][min(restarts - 1, 4)]
-        print(Log.stamp(), "ledgehostd: input: restart \(restarts) in \(Int(delay)) s")
+        let delay = backoff.nextDelay()
+        print(Log.stamp(), "ledgehostd: input: restart \(backoff.attempts) in \(Int(delay)) s")
         loop.scheduleTask(in: .milliseconds(Int64(delay * 1000))) { [weak self] in self?.start() }
     }
 
     /// One event worth of op records from the injecting session.
     func send(_ records: [Data]) {
-        guard let channel else { return }
-        var buf = channel.allocator.buffer(capacity: records.reduce(0) { $0 + $1.count })
-        for r in records { buf.writeBytes(r) }
-        channel.writeAndFlush(buf, promise: nil)
+        supervisor.send(records.reduce(into: Data()) { $0.append($1) })
     }
 
     /// op 7: a device's text becomes the host CLIPBOARD selection.
@@ -171,36 +87,27 @@ final class InputService {
     /// The injecting session ended (or the arbitration moved): release
     /// everything it held.
     func releaseHeld() { send([InputRecord.releaseAll]) }
-}
 
-/// Reads framed records off the input helper's stdout (currently op 1,
-/// CLIPBOARD text changed under a foreign owner).
-private final class InputOutputHandler: ChannelInboundHandler {
-    typealias InboundIn = ByteBuffer
-    private weak var service: InputService?
-    private var buffer = Data()
-
-    init(service: InputService?) { self.service = service }
-
-    func channelRead(context: ChannelHandlerContext, data: NIOAny) {
-        var buf = unwrapInboundIn(data)
-        if let bytes = buf.readBytes(length: buf.readableBytes) { buffer.append(contentsOf: bytes) }
-        while let total = InputRecord.outputRecordLength(buffer) {
+    /// Framed records off the helper's stdout (currently op 1,
+    /// CLIPBOARD text changed under a foreign owner).
+    private func feed(_ bytes: Data) {
+        outputBuffer.append(contentsOf: bytes)
+        while let total = InputRecord.outputRecordLength(outputBuffer) {
             guard total > 0 else {
                 print(Log.stamp(), "ledgehostd: input: bad output record — dropping rest")
-                buffer.removeAll(); return
+                outputBuffer.removeAll(); return
             }
-            guard buffer.count >= total else { return }
-            let rec = buffer.subdata(in: buffer.startIndex..<buffer.startIndex + total)
-            buffer.removeSubrange(buffer.startIndex..<buffer.startIndex + total)
+            guard outputBuffer.count >= total else { return }
+            let rec = outputBuffer.subdata(in: outputBuffer.startIndex..<outputBuffer.startIndex + total)
+            outputBuffer.removeSubrange(outputBuffer.startIndex..<outputBuffer.startIndex + total)
             guard let (op, body) = InputRecord.parseOutput(rec) else { continue }
             guard op == InputRecord.recordClipboardText else { continue }
             guard let text = String(data: body, encoding: .utf8) else {
                 print(Log.stamp(), "ledgehostd: input: clipboard record not UTF-8 — dropped")
                 continue
             }
-            guard let service else { continue }
-            service.loop.execute { service.onClipboard?(text) }
+            let onClipboard = self.onClipboard
+            loop.execute { onClipboard?(text) }
         }
     }
 }
