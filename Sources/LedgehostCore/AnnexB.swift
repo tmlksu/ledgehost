@@ -21,35 +21,41 @@ public enum AnnexB {
     public static let droppedTypes: Set<UInt8> = [35, 36, 37, 38]    // AUD EOS EOB FD(filler)
 
     public static func split(_ data: Data) -> [AnnexBNAL] {
-        // Locate every start code (00 00 01 or 00 00 00 01).
-        var starts: [(offset: Int, length: Int)] = []
-        var i = data.startIndex
-        let end = data.endIndex
-        while i + 2 < end {
-            if data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 1 {
-                starts.append((i, 3))
-                i += 3
-            } else if i + 3 < end && data[i] == 0 && data[i + 1] == 0
-                        && data[i + 2] == 0 && data[i + 3] == 1 {
-                starts.append((i, 4))
-                i += 4
-            } else {
-                i += 1
-            }
-        }
+        // Locate every start code (00 00 01 or 00 00 00 01). The scan
+        // touches every byte, so it indexes through a buffer pointer:
+        // Data's subscript costs ~100x more per byte here (measured
+        // ~11 ms per 30 KB AU in debug, ~65 % of a core at 60 fps).
         var nals: [AnnexBNAL] = []
-        for (idx, s) in starts.enumerated() {
-            let begin = s.offset + s.length
-            let last = idx + 1 < starts.count ? starts[idx + 1].offset : end
-            // Trim trailing zero bytes that belong to the next start
-            // code's leading zeros (already counted in its offset only
-            // when they form 00 00 00 01; for 3-byte codes they pad the
-            // previous NAL and decoders accept them stripped).
-            var bodyEnd = last
-            while bodyEnd > begin && data[bodyEnd - 1] == 0 { bodyEnd -= 1 }
-            guard bodyEnd > begin else { continue }
-            let nal = data.subdata(in: begin..<bodyEnd)
-            nals.append(AnnexBNAL(type: (nal[nal.startIndex] >> 1) & 0x3f, bytes: nal))
+        data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
+            guard let bytes = raw.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return }
+            let end = raw.count
+            var starts: [(offset: Int, length: Int)] = []
+            var i = 0
+            while i + 2 < end {
+                if bytes[i] == 0 && bytes[i + 1] == 0 && bytes[i + 2] == 1 {
+                    starts.append((i, 3))
+                    i += 3
+                } else if i + 3 < end && bytes[i] == 0 && bytes[i + 1] == 0
+                            && bytes[i + 2] == 0 && bytes[i + 3] == 1 {
+                    starts.append((i, 4))
+                    i += 4
+                } else {
+                    i += 1
+                }
+            }
+            for (idx, s) in starts.enumerated() {
+                let begin = s.offset + s.length
+                let last = idx + 1 < starts.count ? starts[idx + 1].offset : end
+                // Trim trailing zero bytes that belong to the next start
+                // code's leading zeros (already counted in its offset only
+                // when they form 00 00 00 01; for 3-byte codes they pad the
+                // previous NAL and decoders accept them stripped).
+                var bodyEnd = last
+                while bodyEnd > begin && bytes[bodyEnd - 1] == 0 { bodyEnd -= 1 }
+                guard bodyEnd > begin else { continue }
+                let nal = data.subdata(in: begin..<bodyEnd)
+                nals.append(AnnexBNAL(type: (bytes[begin] >> 1) & 0x3f, bytes: nal))
+            }
         }
         return nals
     }

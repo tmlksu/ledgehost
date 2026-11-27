@@ -155,6 +155,80 @@ final class ConverterTests: XCTestCase {
         for f in frames { total += WireReassemble.splitLengthPrefixed(f)!.count }
         XCTAssertEqual(all.count, total)
     }
+
+    /// AnnexB.split was rewritten to scan via a buffer pointer (the
+    /// Data-subscript version cost ~11 ms/AU in debug). The reference
+    /// below is that previous implementation verbatim; this test proves
+    /// the two produce identical NALs on adversarial buffers.
+    private func referenceSplit(_ data: Data) -> [AnnexBNAL] {
+        var starts: [(offset: Int, length: Int)] = []
+        var i = data.startIndex
+        let end = data.endIndex
+        while i + 2 < end {
+            if data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 1 {
+                starts.append((i, 3))
+                i += 3
+            } else if i + 3 < end && data[i] == 0 && data[i + 1] == 0
+                        && data[i + 2] == 0 && data[i + 3] == 1 {
+                starts.append((i, 4))
+                i += 4
+            } else {
+                i += 1
+            }
+        }
+        var nals: [AnnexBNAL] = []
+        for (idx, s) in starts.enumerated() {
+            let begin = s.offset + s.length
+            let last = idx + 1 < starts.count ? starts[idx + 1].offset : end
+            var bodyEnd = last
+            while bodyEnd > begin && data[bodyEnd - 1] == 0 { bodyEnd -= 1 }
+            guard bodyEnd > begin else { continue }
+            let nal = data.subdata(in: begin..<bodyEnd)
+            nals.append(AnnexBNAL(type: (nal[nal.startIndex] >> 1) & 0x3f, bytes: nal))
+        }
+        return nals
+    }
+
+    func testSplitMatchesReferenceOnAdversarialBuffers() throws {
+        // Real fixture AUs first.
+        for r in try fixtureRecords() {
+            let got = AnnexB.split(r.payload)
+            let want = referenceSplit(r.payload)
+            XCTAssertEqual(got.count, want.count)
+            for (a, b) in zip(got, want) {
+                XCTAssertEqual(a.type, b.type)
+                XCTAssertEqual(a.bytes, b.bytes)
+            }
+        }
+        // Seeded fuzz: buffers dense in zeros and start-code-like runs.
+        var state: UInt64 = 0x5eed
+        func next() -> UInt8 {
+            // xorshift64* — deterministic across runs.
+            state ^= state >> 12; state ^= state << 25; state ^= state >> 27
+            return UInt8(truncatingIfNeeded: state &* 0x2545F4914F6CDD1D)
+        }
+        for _ in 0..<2000 {
+            var buf = Data()
+            let len = Int(next() % 200) + 1
+            for _ in 0..<len {
+                let pick = next() % 16
+                switch pick {
+                case 0...5: buf.append(0)                       // heavy zeros
+                case 6: buf.append(1)
+                case 7: buf.append(contentsOf: [0, 0, 1])       // 3-byte code
+                case 8: buf.append(contentsOf: [0, 0, 0, 1])    // 4-byte code
+                default: buf.append(next())
+                }
+            }
+            let got = AnnexB.split(buf)
+            let want = referenceSplit(buf)
+            XCTAssertEqual(got.count, want.count, "count diverged on \(buf as NSData)")
+            for (a, b) in zip(got, want) {
+                XCTAssertEqual(a.type, b.type)
+                XCTAssertEqual(a.bytes, b.bytes)
+            }
+        }
+    }
 }
 
 final class KeymapTests: XCTestCase {
