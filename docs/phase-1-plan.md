@@ -724,3 +724,19 @@ injection is solid and held-state release is proven).
   suppressed; the new clipdbg channel will identify it if it
   recurs. xquery gained activate/focus/clip wait/clip-legacy;
   scripts/helper-driver.py drives helper records directly.
+- 2026-11-27 jitter fix: fast on-screen elements (progress bars)
+  juddered on the client. Baseline, test source 600 AUs: 300/599
+  wire-timestamp deltas non-monotonic (min/p5 -33 ms, p95/max +83 ms),
+  capture->au-out ~-50 ms — B-frame decode-order reordering from
+  msdkh265enc's default B-pyramid GOP. Fix: b-frames=0
+  b-pyramid=false b-adapt=off on both encoder pipelines; decode order
+  IS presentation order now — wire stamps monotonic by construction
+  (no clamp, zero drift; still rt0 + pts-pts0, 5 s re-anchor), and
+  the reorder-depth encode latency is gone (au-out ~0 ms). Post-fix:
+  0/599 non-monotonic, deltas 13.6-16.7 ms. E2e proof with
+  helpers/ledgehost-bar (override-redirect sweeping bar + binary
+  frame counter, driven via scratch daemon + probe, ffmpeg decode,
+  PIL measure): pre-fix 442/1188 wire frames stepped the bar
+  backward (PTS-order clean, so the corruption is purely
+  decode-order); post-fix wire order == PTS order, 0 counter
+  regressions. No wire-format change; swift test 37/37.

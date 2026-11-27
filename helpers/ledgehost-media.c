@@ -319,7 +319,13 @@ int main(int argc, char **argv)
      * joining decoder cannot start from. msdkh265enc answers the same
      * request with a real IDR (NAL 19 + in-band sets), verified P1-M1.
      * gop-size=300 is the same 5 s safety net; msdk's VBV knob is
-     * max-vbv-bitrate (a rate, not a size) and is left at auto. */
+     * max-vbv-bitrate (a rate, not a size) and is left at auto.
+     * b-frames=0: with B-frames the wire order is DECODE order, so
+     * presentation timestamps jitter ±a few frames and the client
+     * shows backward steps on fast motion (measured: ~50% of AU
+     * deltas non-monotonic, ±17-83 ms). Without B-frames, decode
+     * order IS presentation order — monotonic by construction, and
+     * one reorder-depth of encode latency disappears too. */
     guint kbps = (guint)(bitrate / 1000);
     char pipe_str[2048];
     if (!strcmp(source, "x11")) {
@@ -335,6 +341,7 @@ int main(int argc, char **argv)
             "! video/x-raw,framerate=%d/1 ! %s "
             "! queue leaky=downstream max-size-buffers=1 "
             "! msdkh265enc name=enc rate-control=cbr bitrate=%u gop-size=300 "
+            "b-frames=0 b-pyramid=false b-adapt=off "
             "! h265parse ! video/x-h265,stream-format=byte-stream,alignment=au "
             "! appsink name=sink emit-signals=true max-buffers=8 sync=false",
             rect, fps, conv, kbps);
@@ -347,6 +354,7 @@ int main(int argc, char **argv)
             "! videoconvert ! video/x-raw,format=NV12 "
             "! queue leaky=downstream max-size-buffers=1 "
             "! msdkh265enc name=enc rate-control=cbr bitrate=%u gop-size=300 "
+            "b-frames=0 b-pyramid=false b-adapt=off "
             "! h265parse ! video/x-h265,stream-format=byte-stream,alignment=au "
             "! appsink name=sink emit-signals=true max-buffers=8 sync=false",
             pattern, fps, w, h, kbps);

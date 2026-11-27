@@ -35,7 +35,7 @@ GST_LIBS := -l:libgstapp-1.0.so.0 -l:libgstvideo-1.0.so.0 \
             -lgobject-2.0 -lglib-2.0
 X11_LIBS := -l:libXtst.so.6 -l:libXfixes.so.3 -lX11 -lXext
 
-helpers: $(BIN)/ledgehost-media $(BIN)/ledgehost-input $(BIN)/xquery
+helpers: $(BIN)/ledgehost-media $(BIN)/ledgehost-input $(BIN)/xquery $(BIN)/ledgehost-bar
 
 $(BIN):
 	mkdir -p $(BIN)
@@ -47,6 +47,9 @@ $(BIN)/ledgehost-input: helpers/ledgehost-input.c $(GEN)/keymap.h | $(BIN)
 	$(CC) $(CFLAGS) -Ihelpers -I$(DEVPREFIX)/usr/include -o $@ $< $(X11_LIBS) -lX11
 
 $(BIN)/xquery: helpers/xquery.c | $(BIN)
+	$(CC) $(CFLAGS) -o $@ $< -lX11
+
+$(BIN)/ledgehost-bar: helpers/ledgehost-bar.c | $(BIN)
 	$(CC) $(CFLAGS) -o $@ $< -lX11
 
 keymap: $(GEN)/keymap.h Sources/LedgehostCore/Generated/Keymap.swift
