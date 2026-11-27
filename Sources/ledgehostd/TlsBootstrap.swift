@@ -6,7 +6,7 @@ import NIOSSL
 import NIOTLS
 import LedgehostCore
 
-// TLS bootstrap (audit R1/R-1): the P-256 pin shape shared with the
+// TLS bootstrap: the P-256 pin shape shared with the
 // probe, the server context, and the channel-pipeline assembly.
 //
 // The verification callback establishes only "P-256 peer" and the pin
@@ -15,7 +15,7 @@ import LedgehostCore
 // bytes before the gate passes.
 
 /// The pin rule is shared with the probe (PeerFingerprint in
-/// LedgehostCore, audit R4/R-3); this is only the NIOSSL glue.
+/// LedgehostCore,R-3); this is only the NIOSSL glue.
 func peerFingerprint(_ certificate: NIOSSLCertificate) -> Data? {
     guard let spki = try? certificate.extractPublicKey().toSPKIBytes() else { return nil }
     return PeerFingerprint.ofSPKI([UInt8](spki))
@@ -27,7 +27,7 @@ final class PeerBox: @unchecked Sendable {
     var fingerprint: Data?
 }
 
-/// Per-source new-connection throttle (audit Fable F3 remainder): a
+/// Per-source new-connection throttle: a
 /// token bucket keyed by remote IP applied BEFORE the TLS handler is
 /// installed, so a flooded address pays no handshake crypto.
 ///   rate 1 conn/s sustained, burst 10 — legitimate use is two iPads
@@ -79,8 +79,7 @@ func serverTLSContext(identity: HostIdentity) throws -> NIOSSLContext {
     return try NIOSSLContext(configuration: tlsConfig)
 }
 
-/// Listener pipeline: per-source connection throttle first (audit
-/// Fable F3 — refused addresses never reach TLS), then TLS with the
+/// Listener pipeline: per-source connection throttle first (refused addresses never reach TLS), then TLS with the
 /// SPKI-pin callback, then the session state machine. Every accepted
 /// connection runs the daemon's one event loop.
 func makeServerBootstrap(group: EventLoopGroup, sslContext: NIOSSLContext,

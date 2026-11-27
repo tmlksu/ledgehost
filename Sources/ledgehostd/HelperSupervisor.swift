@@ -8,13 +8,13 @@ import Glibc
 #endif
 
 // Helper supervision shared by MediaService and InputService
-// (audit R2/R3, Fable R-5): path resolution, the minimal environment,
+//: path resolution, the minimal environment,
 // the socketpair plumbing NIO pipe channels need, the stderr relay,
 // and the termination callback are identical for both helpers — what
 // differs is POLICY (restart limits, stop grace, stdin commands), which
 // stays in the services as Spec parameters.
 
-/// The [1,2,5,10,30] crash-loop schedule (audit R3). An attempt older
+/// The [1,2,5,10,30] crash-loop schedule An attempt older
 /// than a minute does not count — a helper that ran a while is not
 /// crash-looping; an orderly stop() resets the count.
 struct RestartBackoff {

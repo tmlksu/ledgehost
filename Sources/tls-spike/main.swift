@@ -20,7 +20,7 @@ setvbuf(stdout, nil, _IONBF, 0)
 //      certificate (vendored SelfSignedCertificate) via NIOSSL, and
 //   2. discovery (Avahi, run separately) makes the host appear.
 //
-// Design, per the Opus review of the Phase 0 plan:
+// Design, per the Phase 0 plan:
 // - the NIOSSL verification callback cannot see the negotiated ALPN,
 //   so it only checks "peer certificate is P-256" and computes the
 //   pin (SHA-256 of the SPKI, via BoringSSL's SPKI bytes — the parity

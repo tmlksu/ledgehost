@@ -25,7 +25,7 @@ LockPersonality=yes
 # this host the unit will not start — remove these two lines.
 ProtectSystem=strict
 ReadWritePaths=%h/.config/ledgehost
-# No-cost hardening (audit S14/S-G): verified by starting a scratch unit
+# No-cost hardening: verified by starting a scratch unit
 # under this user manager.
 ProtectKernelTunables=yes
 ProtectControlGroups=yes

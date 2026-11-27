@@ -20,7 +20,7 @@ three in one directory.
 
 The unit itself carries no site-specific lines. The drop-in sets:
 
-    Environment=DISPLAY=:21
+    Environment=DISPLAY=:1
     Environment=XAUTHORITY=%h/.Xauthority
 
 `scripts/install-service.sh --display :NN --prefix PATH --unit-name N
@@ -62,9 +62,9 @@ Re-running the install script does **not** overwrite an existing
 drop-in whose `DISPLAY` differs from the flag default — it keeps the
 file and warns. Pass `--display` explicitly to force a rewrite.
 
-**Note:** the remote-desktop session may renumber its display after a
-reboot (first free from `:20`). If the desktop comes back on `:22`,
-update the drop-in's `DISPLAY=` and restart.
+**Note:** a session that allocates its display dynamically may
+renumber it after a reboot. If the desktop comes back on a different
+display, update the drop-in's `DISPLAY=` and restart.
 
 ## Day-to-day commands
 

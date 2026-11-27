@@ -47,7 +47,7 @@ final class MediaService {
         case dropping      // over the write water mark: AUs dropped
     }
 
-    /// Per-session MEDIA state only (audit R7): resume position and
+    /// Per-session MEDIA state only: resume position and
     /// the keyframe-request rate state. Input translation, input rate
     /// limiting and the fps preference live on the connection
     /// (ConnectionHandler.inputGate).

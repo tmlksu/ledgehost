@@ -13,7 +13,7 @@ import Glibc
 // end, helper restart or daemon shutdown its held input is released
 // (op 5), and the helper itself releases everything on exit.
 //
-// Spawn plumbing lives in HelperSupervisor (audit R2/R-5); the input
+// Spawn plumbing lives in HelperSupervisor; the input
 // POLICY stays here: restarts are unbounded (the helper must come back
 // whenever watchers exist), and stop() gives the helper a 2 s window
 // to run its release-all exit path before terminate.
@@ -88,7 +88,7 @@ final class InputService {
     /// op 7: a device's text becomes the host CLIPBOARD selection.
     func setClipboard(_ text: String) { send([InputRecord.clipboard(text)]) }
 
-    /// op 8 (audit S-B): the current clipboard-subscriber count. A
+    /// op 8: the current clipboard-subscriber count. A
     /// freshly spawned helper defaults to 0 (fetch nothing), so the
     /// count is re-pushed at every start.
     func setClipboardWatch(_ count: Int) {
@@ -115,7 +115,7 @@ final class InputService {
 
     /// Framed records off the helper's stdout (currently op 1,
     /// CLIPBOARD text changed under a foreign owner). Framing is the
-    /// shared FramedReader (audit Fable R-2).
+    /// shared FramedReader
     private func feed(_ bytes: Data) {
         outputReader.append(bytes)
         do {

@@ -10,7 +10,7 @@ import Glibc
 // Log and the identity/pin stores moved to LedgehostCore's Stores.swift
 // so the R-8 unit tests can reach them.
 
-/// Bounded per-message logging (audit S6/F5): at most `budget` lines
+/// Bounded per-message logging: at most `budget` lines
 /// per `seconds` window; held lines are counted so the next emitted
 /// line can report "(+N held)" — floods stay visible in aggregate
 /// without filling the journal.

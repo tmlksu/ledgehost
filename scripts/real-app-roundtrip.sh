@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # real-app-roundtrip.sh — headless regression for the two real-client
 # acceptance failures (non-ASCII .text typing; clipboard interop with
-# real applications). Runs against :21 with a SCRATCH daemon on a
+# real applications). Runs against a real X display with a SCRATCH daemon on a
 # scratch port and a scratch XDG_CONFIG_HOME — never the live service.
 #
-#   scripts/real-app-roundtrip.sh [display]   (default :21)
+#   scripts/real-app-roundtrip.sh <display>
 #
 # Needs: bin/ledgehost-input, bin/xquery, .build/debug/{ledgehostd,
 # ledgehost-probe} — `make helpers && swift build` first. Mousepad and
@@ -12,7 +12,7 @@
 
 set -u
 cd "$(dirname "$0")/.."
-DISP="${1:-:21}"
+DISP="${1:?usage: real-app-roundtrip.sh <display>}"
 PORT=17463
 SCRATCH=/tmp/lh-rt
 X="$PWD/bin/xquery"

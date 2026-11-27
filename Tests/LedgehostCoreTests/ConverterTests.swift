@@ -197,7 +197,7 @@ final class KeymapTests: XCTestCase {
     }
 }
 
-// IPC-constants equivalence (audit Fable R-6): pins the Swift values to
+// IPC-constants equivalence: pins the Swift values to
 // the numbers helpers/ledgehost-ipc.h defines — the C side cannot be
 // compiled here, so the literals ARE the cross-language static assert.
 final class IPCLimitsTests: XCTestCase {

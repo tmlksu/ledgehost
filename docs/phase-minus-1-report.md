@@ -149,7 +149,7 @@ clean**. Only 4 files produce errors, all of them confined:
 | RemoteIdentity.swift | 214 | SecKey/SecCertificate for key generation, external representation, signing; the certificate itself is already hand-built DER in this file | swift-crypto P256 key (raw/x963 representations map 1:1); keep the hand-built DER certificate code; SPKI fingerprint is already hand-computed SHA-256 of a hand-built DER SPKI |
 | RemoteTLS.swift | 165 | Network.framework (NWProtocolTLS/NWConnection/sec_protocol_*) + Security | **Replace wholesale** with SwiftNIO + NIOSSL: TLS 1.3, mutual cert, custom verify callback extracting the peer SPKI fingerprint, ALPN `sill/1` / `sill-pair/1`, tickets/resumption off. This file is a builder, not wire logic, so replacing it does not touch byte compatibility |
 
-Replacement mapping (Opus review, confirmed by the audit):
+Replacement mapping (from the independent review):
 
 | Apple | Linux |
 |---|---|
@@ -164,7 +164,7 @@ Verdict: **Linux Swift reuse is viable.** The wire-critical logic
 (framing, Compatibility, PairingProof, RecognitionTag, SPKI
 fingerprint, hand-built certificate DER) is either portable as-is or
 maps 1:1 onto swift-crypto, so byte-identity is structurally
-achievable — the Opus review's main reason for choosing Swift.
+achievable — the review's main reason for choosing Swift.
 Estimated shim work is concentrated in RemoteTLS (a rewrite) and
 RemoteIdentity (a port), not spread across the module.
 
@@ -214,7 +214,7 @@ server-issued credential in the pairing / Hello / TLS paths:
 
 **Kill criterion NOT met → GO for Phase 0.**
 
-## 6. Phase 0 task split (concretising the Opus review)
+## 6. Phase 0 task split (concretising the review)
 
 ### 0-A — Media feasibility (no protocol; target hardware only)
 
@@ -234,7 +234,7 @@ server-issued credential in the pairing / Hello / TLS paths:
 
 ### 0-B — Handshake (real iPad + this code)
 
-Modules M1–M3 from the Opus review, in order:
+Modules M1–M3 from the review, in order:
 
 1. M1: vendor StreamProtocol at v0.6.2; apply the §3 shims
    (guard CoreGraphics import; swift-crypto; own PBKDF2; drop the

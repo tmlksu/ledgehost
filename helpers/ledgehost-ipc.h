@@ -1,5 +1,5 @@
 /* ledgehost-ipc.h — the C-side single source for every constant the
- * helpers and the daemon share (audit Fable R-6). The Swift-side
+ * helpers and the daemon share The Swift-side
  * mirror is Sources/LedgehostCore/IPCLimits.swift: each value below
  * names the Swift constant it must stay equal to, and the
  * LedgehostCoreTests equivalence test pins the numbers.
@@ -28,7 +28,7 @@
  * The op table itself is documented in ledgehost-input.c's spec
  * comment and named by InputRecord.op* in InputRecords.swift —
  * currently ops 1-8, with op 8 carrying the clipboard-subscriber
- * count (audit S-B). */
+ * count */
 #define LH_INPUT_HEADER_LEN  4           /* IPCLimits.inputHeaderLength */
 
 /* Clipboard text bound: == IPCLimits.clipboardTextMax ==
@@ -40,7 +40,7 @@
  * announcing len 0 or len > LH_REC_MAX is unrecoverable framing desync:
  * the helper exits and the daemon restarts it (clamping the announced
  * length would reinterpret attacker-controlled text bytes as further
- * op records — audit F2/S16). */
+ * op records). */
 #define LH_REC_MAX           (LH_CLIP_MAX + 1)
 
 #endif /* LEDGEHOST_IPC_H */

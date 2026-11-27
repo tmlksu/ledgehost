@@ -26,7 +26,7 @@ final class MediaPipeline {
     private var stopTask: Scheduled<Void>?
     private var backoff = RestartBackoff()
     private var lastForcedIDR: Date = .distantPast
-    /// Pipeline-restart debounce (audit S7): fps changes and window
+    /// Pipeline-restart debounce: fps changes and window
     /// resizes could otherwise churn the encoder continuously — at
     /// most one restart per window, latest wins.
     private var pendingRestart: Scheduled<Void>?
@@ -69,7 +69,7 @@ final class MediaPipeline {
 
     /// Settings changes that cannot retune live (fps, source resize)
     /// restart the pipeline; watchers rejoin through kind 0 + IDR.
-    /// Called only on the event loop. Debounced (audit S7).
+    /// Called only on the event loop. Debounced
     func restart() {
         guard running else { return }
         let wait = Self.restartDebounce - Date().timeIntervalSince(lastRequestedRestart)

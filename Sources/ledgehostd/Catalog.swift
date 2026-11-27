@@ -4,7 +4,7 @@ import NIOCore
 import StreamProtocol
 import LedgehostCore
 
-// The session catalog (audit R1/R-1): what a fresh session is told —
+// The session catalog: what a fresh session is told —
 // the window list, the settings state, the signed host info.
 
 extension ConnectionHandler {

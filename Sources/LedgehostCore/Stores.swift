@@ -6,7 +6,7 @@ import SillLinuxShims
 import Glibc
 #endif
 
-// Store plumbing shared by the daemon and the probe (audit R4/R-3):
+// Store plumbing shared by the daemon and the probe:
 // the config-directory rule and the atomic write must be identical in
 // both processes. HostIdentity and PinStore live here too so the R-8
 // unit tests can reach them (executable targets are not testable).
@@ -46,7 +46,7 @@ public func atomicWrite(_ data: Data, to url: URL) throws {
         throw StoreError.io("rename to \(url.path) failed")
     }
     // The file is durable; make the directory entry durable too
-    // (audit S13) — without this a crash can still lose the rename.
+    // — without this a crash can still lose the rename.
     #if canImport(Glibc)
     if let dfd = FileHandle(forReadingAtPath: url.deletingLastPathComponent().path) {
         _ = try? dfd.synchronize()
@@ -155,7 +155,7 @@ public final class PinStore {
     private let lock = NSLock()
     private var file: PinFile
 
-    /// Test seam (audit R-8): reload-failure reporting is injectable so
+    /// Test seam: reload-failure reporting is injectable so
     /// the once-per-episode logging is observable without capturing
     /// stdout. Production callers leave the default print.
     var log: (String) -> Void = { print(Log.stamp(), $0) }
@@ -199,7 +199,7 @@ public final class PinStore {
     /// Re-read paired.json if it changed on disk (the unpair path writes
     /// it from another process) — the live-revocation watch in main.
     /// A read/parse failure keeps the last pin set (the fail-open-for-
-    /// availability tradeoff) but is logged once per episode (audit S12)
+    /// availability tradeoff) but is logged once per episode
     /// so a missed revocation window is diagnosable.
     public func reload() {
         lock.lock(); defer { lock.unlock() }

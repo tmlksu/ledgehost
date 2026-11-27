@@ -7,14 +7,14 @@
  *   1 pointer  kind(1) 0=move 1=lDown 2=lUp 3=rDown 4=rUp, x(4) y(4)
  *              fractions of the frame x1e6, clamped to [0,1]
  *   2 scroll   dx(4) dy(4) fractions x1e6; the wire event's x/y arrive
- *              as the preceding op-1 move (translator-side, audit S-E)
+ *              as the preceding op-1 move (translator-side)
  *   3 key      HID usage(2, BE), down(1)
  *   4 text     UTF-8 bytes (record length bounds it; <= 4096 chars)
  *   5 release-all  6 reset (drop all state)
  *   7 set clipboard  UTF-8 text (<= 256 KiB); the helper takes the
  *              CLIPBOARD selection and serves it
  *   8 clipboard watch  count(1) — sessions subscribed to op-1 reports
- *              (audit S-B); while 0 the helper tracks the owner but
+ *             ; while 0 the helper tracks the owner but
  *              never XConvertSelection-fetches and never emits
  *   9 source rect    x(4) y(4) w(4) h(4) int32 BE pixels — the screen
  *              rectangle input fractions map onto (phase 2: the
@@ -162,7 +162,7 @@ static void release_all(void)
 
 /* MARK: scratch keycode (decision 8: reset at startup and exit) */
 
-/* Keymap cache (audit Fable P-2 / SWE-2 P5): one XGetKeyboardMapping
+/* Keymap cache: one XGetKeyboardMapping
  * result reused across characters instead of a synchronous round-trip
  * per char. A MappingNotify covering more than our scratch keycode is
  * an external layout change (setxkbmap & friends) and refetches the
@@ -196,7 +196,7 @@ static void km_patch_scratch(KeySym sym)
 /* Minimum spacing between a scratch remap and the press that uses it.
  * 0.030 s was chosen from a ~15 ms measured absorption floor on this
  * host (clients must see the MappingNotify before the KeyPress); kept
- * after the P-2 cache — see the audit batch report for the numbers.
+ * after the keymap cache landed — see docs/phase-1-plan.md for the numbers.
  * -D overridable for measurement builds. */
 #ifndef SCRATCH_GAP
 #define SCRATCH_GAP 0.030
@@ -279,8 +279,7 @@ static void type_char(unsigned int cp)
     last_type_ms = now_sec();
     /* Levels 2/3 (the ISO_Level3_Shift / AltGr layer — @, {}, € on
      * de/altgr-intl layouts, plus Shift+AltGr) fall through to the
-     * scratch remap rather than holding a level-3 modifier (audit
-     * Fable S-F): the keysym at level 0 of our scratch keycode types
+     * scratch remap rather than holding a level-3 modifier: the keysym at level 0 of our scratch keycode types
      * the exact character regardless of whether the layout even maps
      * an AltGr key, and no modifier-state dance can leave one held. */
     if (found_kc && level <= 1) {
@@ -300,8 +299,7 @@ static void type_char(unsigned int cp)
          * resolves to NoSymbol (or the next char's keysym). */
         /* the consumer must absorb both the press before us and our
          * remap before it looks up this keycode. SCRATCH_GAP is the
-         * measured client-absorption floor plus margin (audit P-2;
-         * -D overridable for floor measurement builds). */
+         * measured client-absorption floor plus margin (-D overridable for floor measurement builds). */
         double t = now_sec();
         double since = last_scratch_ms > last_type_ms
                      ? t - last_scratch_ms : t - last_type_ms;
@@ -351,7 +349,7 @@ static void op_scroll(const unsigned char *p, int n)
     scroll_acc_y += (int32_t)((p[4] << 24) | (p[5] << 16) | (p[6] << 8) | p[7]);
     /* one click per 1/24 of the frame height (~one wheel notch); the
      * leftover fraction is kept so sub-click deltas are not lost. The
-     * accumulators are bounded (audit S2/F6): one hostile record must
+     * accumulators are bounded: one hostile record must
      * never enqueue tens of thousands of XTest events — the remainder is
      * carried, but only up to a few clicks per record. */
     long per = 1000000 / 24;
@@ -407,7 +405,7 @@ static Window clip_win;
 static unsigned char *set_text;         /* device text we own, or NULL */
 static long set_len;
 static Window clip_owner;               /* last seen CLIPBOARD owner */
-static Time clip_own_time;              /* stamp served for TIMESTAMP (audit S18/S-H) */
+static Time clip_own_time;              /* stamp served for TIMESTAMP */
 static int xfixes_ev_base = -1;
 static int conv_pending;                /* a conversion request is out */
 static int conv_recheck;                /* owner moved while converting */
@@ -416,7 +414,7 @@ static double conv_retry_at;            /* armed re-fetch timer, or 0 */
 static int conv_retries;                /* retries spent on this owner */
 static int clip_dbg = -1;               /* LH_CLIP_DEBUG: verbose decisions */
 static int clip_watch;                  /* op 8: sessions subscribed to copy reports
-                                         * (audit S-B); 0 = fetch nothing, emit nothing */
+                                         *; 0 = fetch nothing, emit nothing */
 
 #define cdbg(...) do { if (clip_dbg) {         fprintf(stderr, "input: clipdbg: " __VA_ARGS__);         fputc('\n', stderr); } } while (0)
 
@@ -477,8 +475,7 @@ static void serve_selection(XSelectionRequestEvent *req)
         ev.property = prop;
     } else if (req->target == a_timestamp) {
         /* ICCCM 2.2: TIMESTAMP answers the time ownership was taken,
-         * not 0 — pedantic requestors reject a zero stamp (audit
-         * S18/S-H). */
+         * not 0 — pedantic requestors reject a zero stamp. */
         Time t = clip_own_time;
         XChangeProperty(dpy, req->requestor, prop, XA_INTEGER, 32,
                         PropModeReplace, (unsigned char *)&t, 1);
@@ -498,8 +495,7 @@ static void serve_selection(XSelectionRequestEvent *req)
 
 /* A real X server timestamp: round-trip a zero-length property append
  * on clip_win and take its PropertyNotify stamp — CurrentTime would
- * produce a TIMESTAMP of 0, which pedantic requestors reject (audit
- * S18/S-H). */
+ * produce a TIMESTAMP of 0, which pedantic requestors reject. */
 static Time server_time(void)
 {
     XChangeProperty(dpy, clip_win, a_time, XA_STRING, 8, PropModeAppend,
@@ -517,7 +513,7 @@ static void fetch_clipboard_text(void)
 {
     if (conv_pending) { conv_recheck = 1; return; }
     conv_pending = 1;
-    /* conv_deadline bounds the wait for SelectionNotify (audit S3): an
+    /* conv_deadline bounds the wait for SelectionNotify: an
      * owner that never answers would otherwise wedge all later host ->
      * device fetches until helper restart. */
     conv_deadline = now_sec() + 2.0;
@@ -539,7 +535,7 @@ static void owner_moved(Window owner)
     conv_retry_at = 0;
     if (owner == clip_win || owner == None) return;
     /* Nobody subscribed: note the owner but do not fetch — a busy
-     * selection must not cost quarter-megabyte reads (audit S-B). */
+     * selection must not cost quarter-megabyte reads */
     if (!clip_watch) { cdbg("owner moved, no subscribers — not fetching"); return; }
     fetch_clipboard_text();
 }
@@ -680,7 +676,7 @@ static void op_clipboard(const unsigned char *p, int n)
     set_text = malloc(n);
     if (!set_text) return;
     memcpy(set_text, p, n); set_len = n;
-    /* Take ownership with a real server stamp (audit S18/S-H): it is
+    /* Take ownership with a real server stamp: it is
      * both the argument validity window X uses and the value we serve
      * for TIMESTAMP requests. CurrentTime (0) would leave TIMESTAMP
      * unanswered in effect. */
@@ -772,7 +768,7 @@ int main(void)
             uint32_t len = (buf[off] << 24) | (buf[off+1] << 16) | (buf[off+2] << 8) | buf[off+3];
             if (len == 0 || len > LH_REC_MAX) {
                 /* unrecoverable desync — never clamp-and-parse
-                 * (audit F2/S16); die so the daemon restarts us */
+                 *; die so the daemon restarts us */
                 logf("fatal: bad record len %u", len);
                 fatal = 1;
                 break;

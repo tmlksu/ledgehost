@@ -36,7 +36,7 @@ final class PairingManager {
     }
 
     private func rotateLocked() {
-        // Fail closed (audit S10/F10): a failed RNG must never leave a
+        // Fail closed: a failed RNG must never leave a
         // known code or a zero QR secret in force — with codeKey nil
         // every proof answer is `closed`.
         guard let newCode = PairingCode.generate() else {
@@ -54,12 +54,12 @@ final class PairingManager {
         codeKey = PairingProof.codeKey(code: code, macFingerprint: identity.fingerprint)
         qrSecret = Data(secret)
         triesLeft = Self.maxTries
-        // Code only, never the link (audit S11/F4): the QR secret is a
+        // Code only, never the link: the QR secret is a
         // live credential and must not land in the persistent journal.
         print(Log.stamp(), "pairing: code \(PairingCode.grouped(code))")
     }
 
-    /// Per-source proof-failure throttle (audit Fable F3 remainder):
+    /// Per-source proof-failure throttle:
     /// the 5-try rotation budget is global — an address that keeps
     /// sending wrong proofs would otherwise keep spending it via fresh
     /// connections. After `failLimit` failed proofs inside `failWindow`

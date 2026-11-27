@@ -1,7 +1,7 @@
 import Foundation
 import Crypto
 
-// Peer keying shared by ledgehostd and ledgehost-probe (audit R4/R-3):
+// Peer keying shared by ledgehostd and ledgehost-probe:
 // the SPKI-pin rule must exist in exactly one place — two copies could
 // drift apart, and this check is the entire TLS peer gate.
 

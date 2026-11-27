@@ -3,7 +3,7 @@ import Foundation
 @testable import LedgehostCore
 import StreamProtocol
 
-// Store tests (audit R10 / Fable R-8): pin add/remove/reload, corrupt
+// Store tests: pin add/remove/reload, corrupt
 // paired.json keeps the last-good set and logs once per episode, a
 // corrupt identity is a loud failure that never regenerates, and
 // atomicWrite's 0600 + rename shape.

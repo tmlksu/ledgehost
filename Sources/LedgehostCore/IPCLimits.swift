@@ -1,8 +1,7 @@
 import Foundation
 import StreamProtocol
 
-/// Cross-process IPC constants — the Swift-side single source (audit
-/// Fable R-6). The C-side mirror is helpers/ledgehost-ipc.h: each
+/// Cross-process IPC constants — the Swift-side single source. The C-side mirror is helpers/ledgehost-ipc.h: each
 /// value names the LH_* macro it must stay equal to, pinned by the
 /// LedgehostCoreTests equivalence test. Wire-protocol caps owned by
 /// vendored StreamProtocol are referenced, not copied.
@@ -27,6 +26,6 @@ public enum IPCLimits {
     public static let clipboardTextMax = Clipboard.maxTextBytes
     /// LH_REC_MAX: the largest valid stdin record (op byte + one
     /// maximal clipboard text). A len of 0 or above this is fatal
-    /// framing desync on the C side (audit F2/S16).
+    /// framing desync on the C side
     public static let inputRecordMax = clipboardTextMax + 1
 }

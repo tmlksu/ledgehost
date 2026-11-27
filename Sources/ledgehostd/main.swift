@@ -16,7 +16,7 @@ setvbuf(stdout, nil, _IONBF, 0)
 // A dead helper's stdout pipe must never kill the daemon.
 signal(SIGPIPE, SIG_IGN)
 
-// ledgehostd — wiring only (audit R1/R-1): identity + stores, discovery,
+// ledgehostd — wiring only: identity + stores, discovery,
 // the shared session state, service construction, the media fan-out,
 // timers, and the event-loop entry. The session state machine lives in
 // ConnectionHandler.swift, TLS in TlsBootstrap.swift, the catalog in
@@ -183,7 +183,7 @@ defer {
     try? group.syncShutdownGracefully()
 }
 
-// Pairing credential expiry (audit S11/F4): while unpaired a printed
+// Pairing credential expiry: while unpaired a printed
 // code stays valid indefinitely, so code + QR secret rotate on a timer
 // independent of pairing attempts — a code's lifetime is ≤ 10 min.
 eventLoop.scheduleRepeatedTask(initialDelay: .seconds(600), delay: .seconds(600)) { _ in

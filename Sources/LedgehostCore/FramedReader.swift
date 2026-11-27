@@ -10,7 +10,7 @@ public enum FrameViolation: Error, Equatable {
     case oversized(payloadBytes: Int, cap: Int)
 }
 
-/// Incremental framed-record reader (audit Fable R-2): one byte buffer
+/// Incremental framed-record reader: one byte buffer
 /// and loop, parameterized by
 ///  - the header layout (fixed `headerLength` + a `parseHeader` that
 ///    maps the buffered prefix to a declared payload length, throwing

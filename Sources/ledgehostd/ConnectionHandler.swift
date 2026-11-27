@@ -7,7 +7,7 @@ import NIOTLS
 import StreamProtocol
 import LedgehostCore
 
-// The session layer (audit R1/R-1): the registry that owns session
+// The session layer: the registry that owns session
 // state and the per-connection state machine — awaitingGate → pairing
 // | awaitingHello → session → done. Wire parsing, deadlines, input
 // arbitration, media wiring and clipboard fan-out all hang off this
@@ -23,7 +23,7 @@ import LedgehostCore
 final class SessionRegistry {
     var sessions: [ObjectIdentifier: ConnectionHandler] = [:]
 
-    /// Open sill-pair/1 connections (audit S5/F3-lite): the pairing door
+    /// Open sill-pair/1 connections: the pairing door
     /// is unauthenticated, so its concurrency is capped — extra
     /// connections are refused at handshake time. Sessions that leave
     /// the pairing state or die decrement this.
@@ -50,7 +50,7 @@ extension SessionRegistry {
 }
 private var injectorStorage: ConnectionHandler?
 
-/// Per-session input state (audit R7): the wire-event translator, the
+/// Per-session input state: the wire-event translator, the
 /// 240/s rate limiter and the viewport fps preference are the
 /// connection's business — MediaService.Watcher keeps only media
 /// resume state.
@@ -81,7 +81,7 @@ final class ConnectionHandler: ChannelInboundHandler {
 
     private let peer: PeerBox
     private var state: State = .awaitingGate
-    /// Wire framing (FramedReader, audit Fable R-2). The payload cap is
+    /// Wire framing (FramedReader). The payload cap is
     /// re-read per record so it tightens/loosens with `state`.
     private lazy var reader = FramedReader<StreamHeader>.streamMessages { [weak self] in
         guard let self, self.state == .pairing else { return StreamMessage.maxClientPayload }
@@ -89,13 +89,13 @@ final class ConnectionHandler: ChannelInboundHandler {
     }
     private var tick: RepeatedTask?
     /// Deadline for whichever pre-session wait is current: TLS handshake,
-    /// pair request, or first Hello (audit S5/F3-lite/F12). Reused so a
+    /// pair request, or first Hello Reused so a
     /// connection can never hold more than one pending deadline.
     private var deadline: Scheduled<()>?
     private weak var channel: Channel?
-    /// This connection holds a pairing-door slot (audit S5 cap).
+    /// This connection holds a pairing-door slot
     private var holdsPairingDoor = false
-    /// Bounded per-message logging (audit S6/F5).
+    /// Bounded per-message logging
     private var inputLog = LogSampler()
     var msgLog = LogSampler()
     var label = "?"
@@ -147,7 +147,7 @@ final class ConnectionHandler: ChannelInboundHandler {
             }
             switch negotiated {
             case "sill-pair/1":
-                // Cap concurrent unauthenticated doors (audit S5/F3-lite):
+                // Cap concurrent unauthenticated doors:
                 // a connect flood may not hold unbounded handshake slots.
                 guard registry.pairingDoors < SessionRegistry.maxPairingDoors else {
                     print(Log.stamp(), "ledgehostd: pairing door busy (\(registry.pairingDoors) open) — refusing extra connection")
@@ -171,7 +171,7 @@ final class ConnectionHandler: ChannelInboundHandler {
                     state = .awaitingHello
                     print(Log.stamp(), "ledgehostd: session from paired \(RemoteIdentityShortName(fp))")
                     // A pinned client that never says Hello holds a
-                    // slot forever otherwise (audit S5/F12).
+                    // slot forever otherwise
                     deadline = context.eventLoop.scheduleTask(in: .seconds(60)) { [weak self] in
                         guard let self, self.state == .awaitingHello else { return }
                         print(Log.stamp(), "ledgehostd: no Hello within 60 s — closing")
@@ -211,7 +211,7 @@ final class ConnectionHandler: ChannelInboundHandler {
         }
     }
 
-    /// The one StreamMessage serializer (audit R6): every send path is
+    /// The one StreamMessage serializer: every send path is
     /// a thin Channel adapter over this.
     private func send(_ channel: Channel, kind: StreamMessageKind, payload: Data,
                       keyframe: Bool = false) {
@@ -449,7 +449,7 @@ final class ConnectionHandler: ChannelInboundHandler {
 
     /// kind 8 → op records for the input helper. Only the injector
     /// session (most recent .desktop selector) may inject — the gate
-    /// runs BEFORE any logging (audit S6/F5: per-event logging before
+    /// runs BEFORE any logging (per-event logging before
     /// arbitration is a journal-flood surface); events are rate-capped
     /// at 240/s and validated by the translator before they reach
     /// XTest. Logging shows the SHAPE only — event kind, HID usage,
@@ -517,7 +517,7 @@ final class ConnectionHandler: ChannelInboundHandler {
         // those rows never sends them; if one arrives anyway it is
         // ignored and the answer still carries the advertised value.
         var applied: [String] = []
-        var fpsChanged = false            // audit R-9: tracked, not prefix-matched
+        var fpsChanged = false            // tracked, not prefix-matched
         var bitrateToApply: Int?          // whitelist once, use twice
         if let v = change.maxFPS, SettingsChoices.maxFPS.contains(v) {
             if settings.maxFPS != v {
@@ -564,7 +564,7 @@ final class ConnectionHandler: ChannelInboundHandler {
     func channelActive(context: ChannelHandlerContext) {
         channel = context.channel
         label = peer.fingerprint.map { RemoteIdentityShortName($0) } ?? context.channel.remoteAddress.map { "\($0)" } ?? "?"
-        // Bound the TLS handshake (audit S5/F3-lite): crypto runs on this
+        // Bound the TLS handshake: crypto runs on this
         // same event loop, so an unfinished handshake cannot idle here.
         deadline = context.eventLoop.scheduleTask(in: .seconds(15)) { [weak self] in
             guard let self, self.state == .awaitingGate else { return }

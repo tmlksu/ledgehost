@@ -96,7 +96,7 @@ struct SavedHost: Codable {
 }
 
 // configDirectory/ensureDirectory/atomicWrite are the daemon's own
-// store rules (LedgehostCore, audit R4/R-3).
+// store rules (LedgehostCore,R-3).
 let dir = configDirectory("ledgehost-probe")
 try? ensureDirectory(dir)
 let identityURL = dir.appendingPathComponent("identity.json")
@@ -147,7 +147,7 @@ final class Collector: ChannelInboundHandler {
     typealias InboundIn = ByteBuffer
     var onMessage: ((StreamMessageKind, Data, Double) -> Void)?
     var onClose: (() -> Void)?
-    /// Wire framing via the shared FramedReader (audit Fable R-2). The
+    /// Wire framing via the shared FramedReader The
     /// probe now enforces the daemon's client payload cap — an over-cap
     /// frame closes the channel rather than growing the buffer forever
     /// (the one intended behavior change in the refactoring batch).

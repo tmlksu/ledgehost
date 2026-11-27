@@ -6,7 +6,7 @@ import StreamProtocol
 // fields (the C-side spec comment in helpers/ledgehost-input.c mirrors
 // this). A wire scroll event's x/y arrive as the op-1 move immediately
 // preceding the op-2 record — the helper's move coalescing flushes the
-// pending move before the scroll, so clicks land at (x, y) (audit S-E).
+// pending move before the scroll, so clicks land at (x, y)
 // The helper
 // maps fractions onto the source rectangle, converts HID usages to X
 // keycodes, and tracks held state; this side validates, diffs the
@@ -21,7 +21,7 @@ public enum InputRecord {
     public static let opReset: UInt8 = 6
     /// Device text -> host CLIPBOARD selection.
     public static let opClipboard: UInt8 = 7
-    /// Subscriber count for foreign-clipboard reports (audit S-B):
+    /// Subscriber count for foreign-clipboard reports:
     /// the helper skips XConvertSelection fetches and record-1 emits
     /// while it is 0.
     public static let opClipboardWatch: UInt8 = 8
@@ -42,7 +42,7 @@ public enum InputRecord {
 
     /// Largest record the helper's stdin buffer can hold: one op byte
     /// plus a maximal clipboard payload. Mirrors LH_REC_MAX in
-    /// helpers/ledgehost-ipc.h — keep the two in sync (audit F2/S16).
+    /// helpers/ledgehost-ipc.h — keep the two in sync
     public static let maxRecordBytes = IPCLimits.inputRecordMax
 
     public static func record(op: UInt8, body: Data = Data()) -> Data {
@@ -55,7 +55,7 @@ public enum InputRecord {
 
     /// Fraction -> Int32 milli-fraction. The wire values are
     /// unconstrained JSON Doubles and `Int32(Double)` TRAPS on
-    /// overflow/non-finite input (audit S1/F1): callers clamp first,
+    /// overflow/non-finite input: callers clamp first,
     /// this conversion bounds against Int32.min/.max so it cannot trap
     /// even if a future caller forgets.
     private static func milli(_ v: Double) -> Int32 {
@@ -69,7 +69,7 @@ public enum InputRecord {
     /// Clamp bounds: pointer fractions are [0,1] by definition (the
     /// helper clamps to the source rect anyway); scroll deltas are frame
     /// fractions — a full-screen scroll per event is already absurd, so
-    /// ±4 is generous (audit S2/F6; the helper also caps clicks/record).
+    /// ±4 is generous
     private static let pointerBound = 2.0
     private static let scrollBound = 4.0
 
@@ -128,7 +128,7 @@ public enum InputRecord {
     }
 
     /// Helper -> daemon stdout framing as a FramedReader layout
-    /// (audit Fable R-2): len(4, BE, body incl op) + body. len 0 is
+    ///: len(4, BE, body incl op) + body. len 0 is
     /// malformed; len above the cap trips the reader's oversized
     /// violation — both mean framing desync. The `Int` header is the
     /// declared body length, unused by callers.
@@ -248,7 +248,7 @@ public struct InputTranslator {
             // The wire semantics are "scroll AT (x, y)": emit a pointer
             // move ahead of the clicks so they land at the event's
             // coordinates instead of wherever the pointer happens to be
-            // (audit Fable S-E). The helper coalesces plain moves but
+            // The helper coalesces plain moves but
             // flushes a pending move before the scroll record, so the
             // ordering is preserved through its buffer.
             var out: [Data] = []

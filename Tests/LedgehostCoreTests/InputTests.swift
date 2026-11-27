@@ -34,7 +34,7 @@ final class InputTests: XCTestCase {
 
     /// The wire's .scroll means "scroll AT (x, y)" — the translator
     /// emits a pointer move to those coordinates ahead of the clicks
-    /// (audit Fable S-E).
+    ///
     func testScrollTranslation() {
         var t = InputTranslator()
         let out = t.translate(.scroll(x: 0.25, y: 0.75, dx: 0.1, dy: -0.05))!
@@ -158,7 +158,7 @@ final class InputTests: XCTestCase {
         XCTAssertEqual(String(decoding: bodyOut, as: UTF8.self), "clip-text-42")
     }
 
-    // MARK: - hostile input doubles (audit S1/F1, S2/F6)
+    // MARK: - hostile input doubles
 
     /// A paired client controls every Double in an InputEvent. The
     /// translator must never trap and must clamp before any Int32
@@ -208,7 +208,7 @@ final class InputTests: XCTestCase {
     }
 
     /// A maximal clipboard op-7 record fits the agreed IPC bound
-    /// (audit F2/S16): REC_MAX in the helper is CLIP_MAX+1 == 256KiB+1.
+    ///: REC_MAX in the helper is CLIP_MAX+1 == 256KiB+1.
     func testClipboardRecordWithinIPCMax() {
         let text = String(repeating: "x", count: 256 * 1024)
         let rec = InputRecord.clipboard(text)

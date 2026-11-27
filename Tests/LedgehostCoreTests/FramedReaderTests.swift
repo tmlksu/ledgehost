@@ -3,7 +3,7 @@ import Foundation
 @testable import LedgehostCore
 import StreamProtocol
 
-// FramedReader edge cases (audit Fable R-2): oversized lengths, split
+// FramedReader edge cases: oversized lengths, split
 // headers and garbage, exercised per call-site layout and policy.
 final class FramedReaderTests: XCTestCase {
 

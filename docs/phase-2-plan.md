@@ -69,9 +69,9 @@ sets the negotiated frame size — no rect args needed.
   list no longer contains the window. The client re-asserts from the
   new list — it never hangs on a dead stream.
 
-## Compositor truth (measured on :21, 2026-11-27)
+## Compositor truth (measured 2026-11-27)
 
-xfwm4 runs on :21 but does NOT own `_NET_WM_CM_S0` — its compositor is
+xfwm4 runs on the target session but does NOT own `_NET_WM_CM_S0` — its compositor is
 off. Measured anyway: a managed 400×300 red window placed at (600,475)
 was covered on the right half by a raised override-redirect blue
 window (visible in a root capture), then `ximagesrc xid=<red>` +
@@ -130,7 +130,7 @@ Probe: `windows` mode prints the pushed list (id/title/geometry);
 `.desktop`; `input` gains a `select window <id>` script step so input
 proofs drive a window session.
 
-## Proof plan (:21, headless)
+## Proof plan (target X session, headless)
 
 solidwin-style titled scratch windows (distinctive size + color) plus
 the bar fixture; probe lists them; per-window record → decoded frame

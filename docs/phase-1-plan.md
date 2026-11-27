@@ -2,10 +2,8 @@
 
 Status: v2, approved by the user 2026-11-26. Implementation
 starts with P1-M0. This version folds in the required changes
-from three independent reviews of the v1 draft (an Opus advisor
-review and two coding-model reviews, all "proceed with changes";
-review files: docs/phase-1-review-opus.md,
-docs/phase-1-review-swe2.md, docs/phase-1-review-fable.md).
+from three independent reviews of the v1 draft (all "proceed with
+changes").
 
 Goal: from the genuine client, see the host's desktop moving and
 operate it — capture → HEVC → wire → client decode, plus pointer,
@@ -272,10 +270,9 @@ contains "\n"):
 
 - P1-M0 Capture gate (measurement, before integration).
   On the target desktop session (see the progress log: the
-  target machine is headless, its :0 is a lightdm greeter with
-  no user session, and the user designated the :21 remote
-  desktop session, 1600x1200, as the desktop this phase
-  mirrors), run both candidate pipelines at that session's
+  target machine is headless and the phase targets a
+  designated remote-desktop X session, 1600x1200), run
+  both candidate pipelines at that session's
   native resolution with framerate=60/1 for 10 s each —
   (a) ximagesrc use-damage=false show-pointer=false →
   vapostproc → NV12 (VAMemory) → vah265lpenc → fakesink
@@ -389,22 +386,21 @@ injection is solid and held-state release is proven).
 
 ## Progress log
 
-- 2026-11-26: v1 draft written; three reviews received (all
-  proceed-with-changes); v2 written folding in every required
-  change; user approved v2 and implementation start.
+- 2026-11-26: v1 draft written; three independent reviews
+  received (all proceed-with-changes); v2 written folding in
+  every required change; approved and implementation start.
 - 2026-11-26 (later): P1-M0 first attempt stopped the phase
   per its own rule — the assumed seat session does not exist:
-  :0 is a lightdm greeter (no user login since boot), every
-  physical output is disconnected (headless machine), and the
-  greeter's cookie is root-only. The user designated the :21
-  remote-desktop Xfce session (1600x1200, the desktop actually
-  used on this machine) as the target desktop; the gate
-  reruns there. Provisional numbers from that session at
+  the console display is a display-manager greeter (no user
+  login since boot), every physical output is disconnected
+  (headless machine), and the greeter's cookie is root-only.
+  The gate reran on a designated remote-desktop Xfce session
+  (1600x1200), the desktop actually used on this machine. Provisional numbers from that session at
   1600x1200 (10 s each): videoconvert path ~60 fps sustained
   idle and busy; vapostproc path lower (~49 idle, ~38 busy) —
   on this iGPU the CPU conversion wins. Also established:
   vah265lpenc cpb-size is in kilobits.
-- 2026-11-26: P1-M0 formal run on :21 at its native
+- 2026-11-26: P1-M0 formal run on the target session at its native
   1600x1200, spec pipelines, framerate=60/1, 10 s each
   (fpsdisplaysink counting; "busy" = mpv looping a synthetic
   testsrc2 clip in the session). Results:
@@ -465,8 +461,8 @@ injection is solid and held-state release is proven).
     low bytes.
 - 2026-11-26: P1-M2 daemon integration done, loopback-verified
   end-to-end with the probe: scratch identity + scratch port,
-  probe `record` selected the desktop → helper spawned on :21
-  (ximagesrc → videoconvert → msdkh265enc, the M1-verified
+  probe `record` selected the desktop → helper spawned on the
+  target session (ximagesrc → videoconvert → msdkh265enc, the M1-verified
   encoder), 647 kind-1 frames over ~11 s, all decode cleanly in
   ffprobe at 1600x1200 (coded == display again). Verified on the
   wire: kind 0 sets before frames, forced IDR on join (session
@@ -489,20 +485,20 @@ injection is solid and held-state release is proven).
   visibly moving on the iPad) still pending — it needs the user
   and the device.
 - 2026-11-26 (night): P1-M2 real-client acceptance PASSED. The
-  new daemon (real identity, port 17455, DISPLAY :21) replaced
-  the Phase 0 daemon after a config backup; the genuine client
-  connected with its saved entry, selected the desktop, and
-  displayed the :21 desktop; a seconds clock placed on the
+  new daemon (production identity, configured port and
+  display) replaced the Phase 0 daemon after a config backup;
+  the genuine client connected with its saved entry, selected
+  the desktop, and displayed the host desktop; a seconds clock placed on the
   desktop ticked visibly on the iPad. ClientStats during the
   check: fps 60, rtt ~6 ms (frameAge reads 0 ms - the host
   clock runs slightly ahead of the device clock; noted, not a
   blocker). Input does nothing yet, as scoped: that is P1-M3.
 - 2026-11-27: P1-M3 input implemented and verified headlessly
-  on :21 with a scratch daemon (port 17460) and the probe's new
+  on the target session with a scratch daemon and the probe's new
   `input` mode. Built: helpers/ledgehost-input.c (XTest
   injection; XTest ABI declared directly — devprefix lacks
   XInput headers; root-window rectangle, no RandR — single-head
-  :21; pointer moves coalesced; buttons 1-7 incl. wheel click
+  session; pointer moves coalesced; buttons 1-7 incl. wheel click
   accumulation 120/click milli-fractions... measured: scroll
   clicks fire per ~1/24 frame fraction; text fast path with
   scratch-keycode remap fallback + restore; held-state tracking
@@ -542,7 +538,7 @@ injection is solid and held-state release is proven).
   single static kind 14, scrollGesture vs .scroll usage, and
   event rate vs the 240/s cap.
 - 2026-11-27: P1-M4 join & recovery verified on the scratch
-  daemon (:21, port 17460) with the probe's extended record
+  daemon (target session, scratch port) with the probe's extended record
   mode (per-second ClientStats, frameAge measurement, --stall
   flag). Measured:
   • Rejoin time: selectSource -> first frame = 330 ms, 224 ms,
@@ -597,9 +593,9 @@ injection is solid and held-state release is proven).
   kind 0 + IDR.
 - 2026-11-27 (night): P1-M3 real-client acceptance PASSED,
   and with it the Phase 1 slice is complete end to end. The
-  M3-M5 build replaced the M2 daemon on port 17455 (config
-  backed up first); from the iPad the user clicked, typed
-  into a text editor, and scrolled on the :21 desktop - all
+  M3-M5 build replaced the M2 daemon on the production port
+  (config backed up first); from the iPad the user clicked,
+  typed into a text editor, and scrolled on the host desktop - all
   confirmed working. Shape-only log observations from the
   session: typing from the software keyboard arrives as
   .text events (95, one character each), with only 2 .key
@@ -646,8 +642,8 @@ injection is solid and held-state release is proven).
   XFixesSelectionNotifyEvent had subtype at the wrong
   offset (garbage fields → every event ignored); fixed to
   the canonical layout, after which owner-change events
-  decode correctly. Verified headlessly (synthetic content,
-  scratch daemon on 17460, :21): (a) xquery clip set ->
+  decode correctly. Verified headlessly (synthetic content, scratch
+  daemon on the target session): (a) xquery clip set ->
   subscribed probe received the same text; (b) probe --text
   -> xquery clip get read it back, with the helper's own
   set correctly not re-reported; (c) a second subscribed
@@ -686,10 +682,9 @@ injection is solid and held-state release is proven).
   drop-in DISPLAY preservation warned and kept; teardown
   removed unit/drop-in/prefix cleanly. docs/packaging.md
   documents install/linger/display-change/commands/
-  upgrade/uninstall and the CRD display-renumber caveat.
-  Real-service cutover is the orchestrator's step.
+  upgrade/uninstall and the display-renumber caveat.
 - 2026-11-27 (acceptance fixes): two real-client failures
-  reproduced and fixed with real GTK apps on :21 (Mousepad,
+  reproduced and fixed with real GTK apps on the target session (Mousepad,
   xfce4-terminal — driven via a scratch daemon + the
   helper's record protocol; script scripts/real-app-
   roundtrip.sh re-runs the whole check).
@@ -740,44 +735,45 @@ injection is solid and held-state release is proven).
   backward (PTS-order clean, so the corruption is purely
   decode-order); post-fix wire order == PTS order, 0 counter
   regressions. No wire-format change; swift test 37/37.
-- 2026-11-27: S-effort security batch from audit-swe2 + audit-fable
-  (17 items): input-double sanitize+clamp at InputRecord/translator
-  (S1/F1 trap fixed; verified probe 'move 10000 0' no longer crashes
+- 2026-11-27: security hardening batch (17 items): input-double
+  sanitize+clamp at InputRecord/translator (an Int-trap fixed;
+  verified probe 'move 10000 0' no longer crashes
   the daemon — it logged and survived), op-7 IPC bound shared
   (helper buf = 4+REC_MAX, REC_MAX = CLIP_MAX+1, mirrored as
-  InputRecord.maxRecordBytes; bad len is FATAL, never clamped — F2/S16;
+  InputRecord.maxRecordBytes; bad len is FATAL, never clamped;
   100 KiB device->host clipboard verified exact via probe+xquery;
   bogus-len stream exits the helper, no ops injected), scroll
-  accumulator capped ~8 clicks/axis (S2/F6), input logging gated to
-  the injector + LogSampler-bounded, stats/refusal logs sampled
-  (S6/F5), TLS-handshake 15 s + Hello 60 s deadlines + 4-slot pairing
-  door cap (S5/F3-lite/F12), conv_pending 2 s deadline (S3), media
-  read off-by-one (S4/F7), pairing RNG fail-closed (S10/F10),
-  clipboard relay re-encoded (S8/S-C), echo token single-use (S9/S-D),
-  pins.reload failure log-once (S12), dir fsync after rename (S13),
-  pairing code-only journal + 10 min rotation (S11/F4), installer
-  arg validation (S15), input-helper write_all (S17), pipeline
-  restart debounce 3 s (S7), unit hardening (S14/S-G — verified via
+  accumulator capped ~8 clicks/axis, input logging gated to
+  the injector + LogSampler-bounded, stats/refusal logs sampled,
+  TLS-handshake 15 s + Hello 60 s deadlines + 4-slot pairing
+  door cap, conv_pending 2 s deadline, media
+  read off-by-one, pairing RNG fail-closed,
+  clipboard relay re-encoded, echo token single-use,
+  pins.reload failure log-once, dir fsync after rename,
+  pairing code-only journal + 10 min rotation, installer
+  arg validation, input-helper write_all, pipeline
+  restart debounce 3 s, unit hardening (verified via
   scratch unit ledgehost-sec: ProtectKernelTunables/ControlGroups/
   RestrictRealtime/ProtectHostname active; CapabilityBoundingSet,
   ProtectKernelModules, ProtectClock all fail 218/CAPABILITIES under
   the user manager and are documented as not-set instead).
   swift test 40/40; loopback-e2e + real-app-roundtrip all pass.
 
-- [x] **2026-11-27 — audit functional bugs (S-E, S-F, S18/S-H)**: wire
+- [x] **2026-11-27 — wire-fidelity functional fixes**: wire
   scroll coordinates honored — translator emits the op-1 move ahead of
   op-2 scroll clicks (helper coalescing flushes pending move first);
   AltGr-level chars (keymap levels 2/3) route through the scratch
   keycode so @{}~€µ²³ etc. type correctly without modifier juggling;
   serve_selection now answers TIMESTAMP with the real ownership stamp
   (server_time() property-append probe + XSetSelectionOwner real time,
-  XFixes selection_timestamp overrides). Verified on :21: scrollspy
+  XFixes selection_timestamp overrides). Verified on the target
+  session: scrollspy
   recorded clicks at (400,300) from a (100,100) start; `de` layout
   `@{[]}\~€µ²³` round-tripped byte-exact through Mousepad; TIMESTAMP
   nonzero and advanced with a fresh .set. swift test 40/40;
   loopback-e2e + real-app-roundtrip pass.
 
-- [x] **2026-11-27 — audit M-effort batch (F3, P-2/P5, P-3, S-B)**:
+- [x] **2026-11-27 — robustness + measurement batch**:
   per-source connection token bucket (1/s sustained, burst 10, per
   remote addr) + per-source pairing-failure throttle (12 fails ->
   pairing door refused for that address; global rotation untouched)
@@ -790,8 +786,9 @@ injection is solid and held-state release is proven).
   10 ms, clean x3 at 12 ms on 47-char runs); clipboard op-8
   subscriber-count pushed to the helper which gates
   XConvertSelection+emit on >0 subscribers (proven: 0 emits
-  unsubscribed -> emit on subscribe -> silence on leave). P-3
-  capture-efficiency MEASURED on :21, no change adopted —
+  unsubscribed -> emit on subscribe -> silence on leave).
+  Capture-efficiency MEASURED on the target session, no change
+  adopted —
   videoconvert+use-damage=false stays: CPU% / delivered au/s:
   baseline 53.8% idle / 55.8% motion @60; use-damage=true 57.7% /
   71.3% (pure overhead, no savings); vapostproc 76.3% / 77.3% with

@@ -4,7 +4,7 @@ import NIOCore
 import StreamProtocol
 import LedgehostCore
 
-// Clipboard relay (audit R1/R-1): kind 32 in both directions — a
+// Clipboard relay: kind 32 in both directions — a
 // device's .set becomes the host CLIPBOARD selection and is relayed to
 // the other subscribers; a foreign X client's copy rides the input
 // helper's output records back to every subscriber.
@@ -18,7 +18,7 @@ private var deviceSetText: String?
 /// unless it is the text a device itself just set (echo suppression).
 func wireClipboardRelay() {
     input.onClipboard = { text in
-        // deviceSetText is a single-use echo token (audit S9/S-D): consumed
+        // deviceSetText is a single-use echo token: consumed
         // on the first helper report, matching or not, so a device-set text
         // cannot indefinitely suppress a foreign copy of the same content.
         let isEcho = text == deviceSetText
@@ -40,7 +40,7 @@ func wireClipboardRelay() {
 }
 
 /// The current kind-32 subscriber count, pushed to the input helper
-/// (op 8) after every change (audit S-B): while it is 0 the helper
+/// (op 8) after every change: while it is 0 the helper
 /// does not issue XConvertSelection fetches or emit record-1s — a busy
 /// selection costs nothing when nobody is listening.
 func pushClipboardWatch() {
@@ -74,7 +74,7 @@ extension ConnectionHandler {
             print(Log.stamp(), "ledgehostd: \(label) set the clipboard (\(text.utf8.count) bytes)")
             deviceSetText = text          // echo suppression, defence in depth
             input.setClipboard(text)
-            // Relay a re-encoded text-only payload (audit S8/S-C), never
+            // Relay a re-encoded text-only payload, never
             // the received bytes verbatim — a crafted message could
             // otherwise smuggle extra fields to other subscribers.
             if let relay = ClipboardPolicy.payload(text: text) {

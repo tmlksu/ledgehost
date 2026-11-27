@@ -4,7 +4,7 @@
 #
 #   scripts/install-service.sh [flags]
 #
-#   --display :NN     DISPLAY for the site drop-in (default :21)
+#   --display :NN     DISPLAY for the site drop-in (default :0)
 #   --prefix PATH     install prefix (default $HOME/.local)
 #   --unit-name NAME  unit name (default ledgehost)
 #   --port N          port for a non-default ExecStart (default 17455)
@@ -14,7 +14,7 @@
 set -euo pipefail
 
 repo="$(cd "$(dirname "$0")/.." && pwd)"
-display=":21"
+display=":0"
 prefix="$HOME/.local"
 unit="ledgehost"
 port=17455
@@ -38,7 +38,7 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-# --- argument validation (audit S15) ----------------------------------
+# --- argument validation ----------------------------------
 # Every flag value lands verbatim in a systemd unit or drop-in; a newline
 # or unit-injection shape in one would smuggle extra directives into the
 # service. Reject them before anything is written.

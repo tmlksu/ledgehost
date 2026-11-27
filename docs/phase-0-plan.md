@@ -1,6 +1,6 @@
 # Phase 0 Plan — ledgehost
 
-Status: reviewed by Opus on 2026-11-26 — verdict "proceed, with changes".
+Status: reviewed on 2026-11-26 — verdict "proceed, with changes".
 
 Progress (2026-11-26):
 - M1 done: pristine import + Linux patch series; the vendored module
@@ -31,7 +31,7 @@ Progress (2026-11-26):
   Regression: `scripts/loopback-e2e.sh`. Release build: full startup
   including the 600,000-round derivation is about 2 s (debug: ~25 s).
   Remaining for Phase 0: 0-A on the target machine and the device
-  criteria below, on the home LAN with the user present.
+  criteria below, on the LAN.
 All 10 required changes from that review are incorporated below.
 Background and diagrams: `explainer.md`. Phase -1 evidence:
 `phase-minus-1-report.md`.
