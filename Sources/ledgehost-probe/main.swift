@@ -291,6 +291,7 @@ if args.mode == "pair" {
         print("window \(String(w.id, radix: 16)) \(w.width)x\(w.height) \(w.appName) \(w.title)")
     }
     print("probe: \(list!.windows.count) window(s), active \(list!.active)")
+    print("probe: capabilities keyRepeat=\(list!.keyRepeat.map(String.init) ?? "nil") clipboard=\(list!.clipboard.map(String.init) ?? "nil")")
     try? channel.close().wait()
     exit(0)
 } else if args.mode == "record" {

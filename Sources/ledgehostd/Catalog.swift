@@ -8,24 +8,30 @@ import LedgehostCore
 // the window list, the settings state, the signed host info.
 
 extension ConnectionHandler {
-    /// The live window list: entries come from WindowTracker (phase
-    /// 2 — ids are xids), active is the session's current source.
-    func sendWindowList(context: ChannelHandlerContext, active: StreamSource) {
-        let list = WindowList(macName: identity.name, windows: windows.wireWindows,
+    /// keyRepeat = 1 (the vendored "generation"): a key held between
+    /// its down and its up repeats at the host's own delay and rate —
+    /// the X server applies autorepeat to XTEST-held keys, so the
+    /// helper needs no repeat logic of its own (verified: one 2 s
+    /// held press produced ~31 characters on the target session).
+    private func catalogList(active: StreamSource) -> WindowList {
+        var list = WindowList(macName: identity.name, windows: windows.wireWindows,
                               active: active,
                               launchID: identity.launchID, hostVersion: "0.0.0-linux",
                               protocol: 1, clipboard: ClipboardPolicy.generation)
-        send(context: context, kind: .windowList, payload: Wire.encode(list))
+        list.keyRepeat = 1
+        return list
+    }
+
+    /// The live window list: entries come from WindowTracker (phase
+    /// 2 — ids are xids), active is the session's current source.
+    func sendWindowList(context: ChannelHandlerContext, active: StreamSource) {
+        send(context: context, kind: .windowList, payload: Wire.encode(catalogList(active: active)))
     }
 
     /// Same push without a handler context (window-list updates fired
     /// by the tracker, not a client message).
     func sendWindowList(active: StreamSource) {
-        let list = WindowList(macName: identity.name, windows: windows.wireWindows,
-                              active: active,
-                              launchID: identity.launchID, hostVersion: "0.0.0-linux",
-                              protocol: 1, clipboard: ClipboardPolicy.generation)
-        send(kind: .windowList, payload: Wire.encode(list))
+        send(kind: .windowList, payload: Wire.encode(catalogList(active: active)))
     }
 
     func settingsState(answering: Int? = nil) -> HostSettingsState {
