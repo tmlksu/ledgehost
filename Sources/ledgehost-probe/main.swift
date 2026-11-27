@@ -477,7 +477,15 @@ if args.mode == "pair" {
         case "up":     ev = .pointer(.leftUp, x: num(f[safe: 1] ?? "0"), y: num(f[safe: 2] ?? "0"))
         case "rdown":  ev = .pointer(.rightDown, x: num(f[safe: 1] ?? "0"), y: num(f[safe: 2] ?? "0"))
         case "rup":    ev = .pointer(.rightUp, x: num(f[safe: 1] ?? "0"), y: num(f[safe: 2] ?? "0"))
-        case "scroll": ev = .scroll(x: 0.5, y: 0.5, dx: num(f[safe: 1] ?? "0"), dy: num(f[safe: 2] ?? "0"))
+        case "scroll":
+            // "scroll dx dy" scrolls at the frame centre; "scroll x y dx dy"
+            // scrolls at explicit coordinates (the S-E wire semantics).
+            if f.count >= 5 {
+                ev = .scroll(x: num(f[safe: 1] ?? "0.5"), y: num(f[safe: 2] ?? "0.5"),
+                             dx: num(f[safe: 3] ?? "0"), dy: num(f[safe: 4] ?? "0"))
+            } else {
+                ev = .scroll(x: 0.5, y: 0.5, dx: num(f[safe: 1] ?? "0"), dy: num(f[safe: 2] ?? "0"))
+            }
         case "key":    ev = .key(hidUsage: UInt16(num(f[safe: 1] ?? "0")),
                                  down: (f[safe: 2] ?? "down") == "down",
                                  modifiers: UInt64(num(f[safe: 3] ?? "0")))

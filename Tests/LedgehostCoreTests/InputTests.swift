@@ -32,13 +32,28 @@ final class InputTests: XCTestCase {
         XCTAssertEqual(body.readBE(Int32.self, at: 5), 750_000)
     }
 
+    /// The wire's .scroll means "scroll AT (x, y)" — the translator
+    /// emits a pointer move to those coordinates ahead of the clicks
+    /// (audit Fable S-E).
     func testScrollTranslation() {
         var t = InputTranslator()
-        let out = t.translate(.scroll(x: 0.5, y: 0.5, dx: 0.1, dy: -0.05))!
-        let (op, body) = parse(out[0])!
-        XCTAssertEqual(op, InputRecord.opScroll)
+        let out = t.translate(.scroll(x: 0.25, y: 0.75, dx: 0.1, dy: -0.05))!
+        XCTAssertEqual(out.count, 2)
+        let (op0, move) = parse(out[0])!
+        XCTAssertEqual(op0, InputRecord.opPointer)
+        XCTAssertEqual(move[0], InputRecord.pointerMove)
+        XCTAssertEqual(move.readBE(Int32.self, at: 1), 250_000)
+        XCTAssertEqual(move.readBE(Int32.self, at: 5), 750_000)
+        let (op1, body) = parse(out[1])!
+        XCTAssertEqual(op1, InputRecord.opScroll)
         XCTAssertEqual(body.readBE(Int32.self, at: 0), 100_000)
         XCTAssertEqual(body.readBE(Int32.self, at: 4), -50_000)
+        // Non-finite coordinates still scroll (no move emitted);
+        // non-finite deltas still move (no clicks emitted); both bad
+        // drops the event entirely.
+        XCTAssertEqual(t.translate(.scroll(x: .nan, y: .nan, dx: 0.1, dy: 0))?.count, 1)
+        XCTAssertEqual(t.translate(.scroll(x: 0.3, y: 0.4, dx: .infinity, dy: 0))?.count, 1)
+        XCTAssertNil(t.translate(.scroll(x: .nan, y: .nan, dx: .infinity, dy: .nan)))
     }
 
     /// Modifier bitmask diffing (decision 8): a key with the shift bit
@@ -173,18 +188,21 @@ final class InputTests: XCTestCase {
     /// milli-fractions) — the daemon-side bound behind helper cap S2/F6.
     func testHostileScrollDeltas() {
         var t = InputTranslator()
-        XCTAssertNil(t.translate(.scroll(x: 0, y: 0, dx: .infinity, dy: 0)))
-        XCTAssertNil(t.translate(.scroll(x: 0, y: 0, dx: 0, dy: .nan)))
+        // Non-finite deltas: no clicks, but the coordinate move still
+        // emits (S-E); a fully broken event returns nil.
+        XCTAssertEqual(t.translate(.scroll(x: 0, y: 0, dx: .infinity, dy: 0))?.count, 1)
+        XCTAssertEqual(t.translate(.scroll(x: 0, y: 0, dx: 0, dy: .nan))?.count, 1)
+        XCTAssertNil(t.translate(.scroll(x: .nan, y: 0, dx: .infinity, dy: 0)))
         for dx in [3000.0, -1e308, 2148.5, 100.0] {
             let out = t.translate(.scroll(x: 0.5, y: 0.5, dx: dx, dy: dx))
-            XCTAssertEqual(out?.count, 1)
-            let (_, body) = parse(out![0])!
+            XCTAssertEqual(out?.count, 2)   // move + scroll (S-E)
+            let (_, body) = parse(out![1])!
             XCTAssertLessThanOrEqual(abs(body.readBE(Int32.self, at: 0)), 4_000_000)
             XCTAssertLessThanOrEqual(abs(body.readBE(Int32.self, at: 4)), 4_000_000)
         }
         // And a sane delta still passes through exactly.
         let out = t.translate(.scroll(x: 0.5, y: 0.5, dx: 0.1, dy: -0.05))!
-        let (_, body) = parse(out[0])!
+        let (_, body) = parse(out[1])!
         XCTAssertEqual(body.readBE(Int32.self, at: 0), 100_000)
         XCTAssertEqual(body.readBE(Int32.self, at: 4), -50_000)
     }

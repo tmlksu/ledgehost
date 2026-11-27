@@ -3,10 +3,11 @@
  *
  * stdin carries length-prefixed records only (a line protocol cannot
  * carry typed text):
- *   length (4, BE, <= 64 KiB) + body: op (1) + fields
+ *   length (4, BE, <= REC_MAX below) + body: op (1) + fields
  *   1 pointer  kind(1) 0=move 1=lDown 2=lUp 3=rDown 4=rUp, x(4) y(4)
  *              fractions of the frame x1e6, clamped to [0,1]
- *   2 scroll   dx(4) dy(4) fractions x1e6
+ *   2 scroll   dx(4) dy(4) fractions x1e6; the wire event's x/y arrive
+ *              as the preceding op-1 move (translator-side, audit S-E)
  *   3 key      HID usage(2, BE), down(1)
  *   4 text     UTF-8 bytes (record length bounds it; <= 4096 chars)
  *   5 release-all  6 reset (drop all state)

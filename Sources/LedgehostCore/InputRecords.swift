@@ -2,7 +2,12 @@ import Foundation
 import StreamProtocol
 
 // Daemon → input helper record protocol (phase-1-plan.md "IPC
-// specifications"): length(4, BE, ≤64KiB) + op(1) + fields. The helper
+// specifications"): length(4, BE, ≤REC_MAX = maxRecordBytes) + op(1) +
+// fields (the C-side spec comment in helpers/ledgehost-input.c mirrors
+// this). A wire scroll event's x/y arrive as the op-1 move immediately
+// preceding the op-2 record — the helper's move coalescing flushes the
+// pending move before the scroll, so clicks land at (x, y) (audit S-E).
+// The helper
 // maps fractions onto the source rectangle, converts HID usages to X
 // keycodes, and tracks held state; this side validates, diffs the
 // modifier bitmask, and turns InputEvent cases into op records.
@@ -202,8 +207,21 @@ public struct InputTranslator {
             case .rightUp: kind = InputRecord.pointerRightUp
             }
             return InputRecord.pointer(kind: kind, x: x, y: y).map { [$0] }
-        case .scroll(_, _, let dx, let dy):
-            return InputRecord.scroll(dx: dx, dy: dy).map { [$0] }
+        case .scroll(let x, let y, let dx, let dy):
+            // The wire semantics are "scroll AT (x, y)": emit a pointer
+            // move ahead of the clicks so they land at the event's
+            // coordinates instead of wherever the pointer happens to be
+            // (audit Fable S-E). The helper coalesces plain moves but
+            // flushes a pending move before the scroll record, so the
+            // ordering is preserved through its buffer.
+            var out: [Data] = []
+            if let move = InputRecord.pointer(kind: InputRecord.pointerMove, x: x, y: y) {
+                out.append(move)
+            }
+            if let scroll = InputRecord.scroll(dx: dx, dy: dy) {
+                out.append(scroll)
+            }
+            return out.isEmpty ? nil : out
         case .text(let s):
             let out = text(s)
             return out.isEmpty ? nil : out
