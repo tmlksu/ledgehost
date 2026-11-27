@@ -20,11 +20,14 @@ Implemented and running:
   scripts such as Japanese via keymap remap), modifier tracking,
   held-state release
 - Clipboard sync (kind 32) with ICCCM requestor interop
+- Host pointer position (kind 26): watching sessions get the pointer
+  as a fraction of their source's frame, on change only, suppressed
+  for the session currently driving it
 - Remote access: a second listener plus a signed kind-18 MacInfo that
   advertises one configured address (e.g. a VPN/WARP route)
 
 Not implemented: audio, virtual displays, pairing "ask" approval UI
-(code pairing is the approval), host pointer position.
+(code pairing is the approval).
 
 ## Requirements
 

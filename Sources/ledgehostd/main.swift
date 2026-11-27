@@ -106,6 +106,9 @@ let input = InputService(group: group,
 let windows = WindowTracker(loop: eventLoop,
                             display: targetDisplay,
                             xauthority: processEnv["XAUTHORITY"])
+let pointer = PointerTracker(loop: eventLoop,
+                             display: targetDisplay,
+                             xauthority: processEnv["XAUTHORITY"])
 wireClipboardRelay()      // input.onClipboard -> subscribed sessions
 
 // MARK: - Media fan-out (kind 0/1 to every watcher)
@@ -181,6 +184,7 @@ defer {
     media.shutdown()
     input.shutdown()
     windows.stop()
+    pointer.stop()
     try? group.syncShutdownGracefully()
 }
 

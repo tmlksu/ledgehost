@@ -24,6 +24,11 @@
  *                           each burst of client-list/configure/title
  *                           changes; exits when stdin closes (the
  *                           daemon holds it open).
+ *   xquery pointer          "root <w> <h>" once, then "ptr <x> <y>"
+ *                           each time the pointer moves (~30 Hz poll,
+ *                           root coordinates; "-1 -1" when it leaves
+ *                           the screen); exits when stdin closes.
+ *   xquery move <x> <y>     warp the pointer to root coordinates
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -330,6 +335,43 @@ static int watch_windows(Window root)
     }
 }
 
+/* pointer: "root <w> <h>" once, then "ptr <x> <y>" each time the
+ * pointer moves, polled at ~30 Hz (root coordinates); "ptr -1 -1"
+ * when the pointer leaves the screen entirely. stdin EOF exits —
+ * the daemon holds the pipe open. */
+static int watch_pointer(Window root)
+{
+    Window rr, cw; int rx, ry, wx, wy; unsigned mask;
+    int lx = -1, ly = -1, loff = 0;
+    {   Window r; int x, y; unsigned w, h, bw, dep;
+        XGetGeometry(d, root, &r, &x, &y, &w, &h, &bw, &dep);
+        printf("root %u %u\n", w, h); fflush(stdout);
+    }
+    int xfd = ConnectionNumber(d);
+    for (;;) {
+        fd_set rfds;
+        FD_ZERO(&rfds); FD_SET(xfd, &rfds); FD_SET(0, &rfds);
+        struct timeval tv = { 0, 33 * 1000 };
+        int r = select(xfd + 1, &rfds, NULL, NULL, &tv);
+        if (r > 0 && FD_ISSET(0, &rfds)) {
+            char b[64];
+            if (read(0, b, sizeof b) <= 0) return 0;   /* daemon gone */
+        }
+        while (XPending(d)) { XEvent ev; XNextEvent(d, &ev); }
+        if (!XQueryPointer(d, root, &rr, &cw, &rx, &ry, &wx, &wy, &mask)) {
+            if (!loff) { puts("ptr -1 -1"); fflush(stdout); loff = 1; }
+            lx = ly = -1;
+            continue;
+        }
+        loff = 0;
+        if (rx != lx || ry != ly) {
+            printf("ptr %d %d\n", rx, ry);
+            fflush(stdout);
+            lx = rx; ly = ry;
+        }
+    }
+}
+
 static int clip_wait(Window win, double secs)
 {
     /* poll until CLIPBOARD has an owner, then fetch like clip get */
@@ -391,6 +433,12 @@ int main(int argc, char **argv)
         { win_atoms(); win_snapshot(root); XCloseDisplay(d); return 0; }
     if (argc >= 2 && !strcmp(argv[1], "watch"))
         { int rc = watch_windows(root); XCloseDisplay(d); return rc; }
+    if (argc >= 2 && !strcmp(argv[1], "pointer"))
+        { int rc = watch_pointer(root); XCloseDisplay(d); return rc; }
+    if (argc >= 4 && !strcmp(argv[1], "move")) {
+        XWarpPointer(d, None, root, 0, 0, 0, 0, atoi(argv[2]), atoi(argv[3]));
+        XFlush(d); XCloseDisplay(d); return 0;
+    }
     if (argc >= 3 && !strcmp(argv[1], "clip")) {
         int rc;
         if (!strcmp(argv[2], "get"))

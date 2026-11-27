@@ -353,6 +353,11 @@ if args.mode == "pair" {
             try? metaOut.write(contentsOf: Data(
                 "{\"k\":1,\"i\":\(c),\"bytes\":\(payload.count),\"idr\":\(types.contains(19) || types.contains(20)),\"age\":\(Int(age))}\n".utf8))
             firstFrame = true
+        case .macPointer:
+            guard let ptr = Wire.decode(MacPointer.self, from: payload) else {
+                print("probe: undecodable kind 26 — ignored"); return
+            }
+            print("probe: pointer inside=\(ptr.inside ?? false) x=\(ptr.x.map { String(format: "%.4f", $0) } ?? "-") y=\(ptr.y.map { String(format: "%.4f", $0) } ?? "-") seen=\(ptr.seen ?? 0)")
         default: break
         }
     }
@@ -469,10 +474,13 @@ if args.mode == "pair" {
     let collector = Collector()
     var listSeen = false
     var gotSets = false, gotFrame = false
-    collector.onMessage = { kind, _, _ts in
+    collector.onMessage = { kind, payload, _ts in
         if kind == .windowList { listSeen = true }
         if kind == .parameterSets { gotSets = true }
         if kind == .frame { gotFrame = true }
+        if kind == .macPointer, let ptr = Wire.decode(MacPointer.self, from: payload) {
+            print("probe: pointer inside=\(ptr.inside ?? false) x=\(ptr.x.map { String(format: "%.4f", $0) } ?? "-") y=\(ptr.y.map { String(format: "%.4f", $0) } ?? "-") seen=\(ptr.seen ?? 0)")
+        }
     }
     let channel = try connect(alpn: "sill/1", hostBox: hostBox, collector: collector)
     guard waitFor(5, until: { hostBox.fingerprint != nil }),

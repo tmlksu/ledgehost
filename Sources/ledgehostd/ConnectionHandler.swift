@@ -294,6 +294,7 @@ final class ConnectionHandler: ChannelInboundHandler {
                     print(Log.stamp(), "ledgehostd: stats \(label): fps \(stats.fps) frameAge \(stats.frameAgeMs) ms rtt \(stats.rttMs) ms\(more)")
                 }
             case .input:
+                inputSeen += 1
                 handleInput(payload: payload)
             case .clipboard:
                 handleClipboard(context: context, payload: payload)
@@ -350,6 +351,48 @@ final class ConnectionHandler: ChannelInboundHandler {
     /// restart + input rect).
     private var watchedRect: (x: Int, y: Int, w: Int, h: Int)?
 
+    /// Kind-8 messages read on this connection: MacPointer.seen,
+    /// which a device compares against its own sent count (it drops
+    /// a pointer position older than its latest input).
+    private(set) var inputSeen = 0
+
+    /// Last kind-26 payload sent, for dedup: (inside,x,y) only —
+    /// `seen` rides along and must not force a resend by itself.
+    private var lastPointer: (inside: Bool, x: Double, y: Double)?
+
+    /// Last pointer input this session injected (kind-26 suppression):
+    /// the vendored "every device but the one driving" — a session
+    /// whose input is actively moving the pointer is not told about
+    /// the moves it causes (`seen` lets it drop stragglers). An idle
+    /// injector still gets reports — host-side moves are not its own.
+    private(set) var lastPointerInputAt = Date.distantPast
+
+    /// Whether this session currently counts as driving the pointer
+    /// (pointer input within the last 0.3 s).
+    var isDrivingPointer: Bool { Date().timeIntervalSince(lastPointerInputAt) < 0.3 }
+
+    /// A `ptr` line arrived: translate into this session's source
+    /// space and send kind 26 when the position it reports changed.
+    /// -1/-1 (off the screen) reads as inside=false.
+    func pointerChanged(rx: Int, ry: Int) {
+        guard let source else { return }
+        let rect: (x: Int, y: Int, w: Int, h: Int)?
+        switch source {
+        case .desktop:
+            rect = windows.rootSize.map { (x: 0, y: 0, w: $0.w, h: $0.h) }
+        case .window(let id):
+            rect = windows.window(id).map { (x: $0.x, y: $0.y, w: $0.width, h: $0.height) }
+        }
+        let (inside, x, y) = SourcePointer.map(rx: rx, ry: ry, rect: rect)
+        let cur = (inside: inside, x: x, y: y)
+        if let last = lastPointer, last == cur { return }
+        lastPointer = cur
+        let ptr = inside
+            ? MacPointer(x: x, y: y, inside: true, seen: inputSeen)
+            : MacPointer(inside: false, seen: inputSeen)
+        send(kind: .macPointer, payload: Wire.encode(ptr))
+    }
+
     /// The screen rectangle the injector's input fractions map onto
     /// (input op 9): the watched window's current rect, or the root
     /// rect for the desktop source.
@@ -384,6 +427,7 @@ final class ConnectionHandler: ChannelInboundHandler {
             let wasWatching = source != nil
             source = s
             watchedRect = nil
+            lastPointer = nil              // a new source space: the next broadcast always reports
             watcher = MediaService.Watcher()       // .needsIDR
             inputGate = InputGate()
             try? channel?.setOption(ChannelOptions.writeBufferWaterMark,
@@ -400,6 +444,7 @@ final class ConnectionHandler: ChannelInboundHandler {
             media.watcherJoined(s, remoteDoor: remoteDoor)
             if !wasWatching { input.watcherJoined() }
             media.requestKeyframe(s)
+            pointer.noteWatchersChanged()
         }
         if case .window(let id) = s, let w = windows.window(id) {
             watchedRect = (w.x, w.y, w.width, w.height)
@@ -421,6 +466,7 @@ final class ConnectionHandler: ChannelInboundHandler {
         }
         media.watcherLeft(s, hasWatchers: !registry.watchers(of: s).isEmpty)
         input.watcherLeft(hasWatchers: !registry.watchers.isEmpty)
+        pointer.noteWatchersChanged()
     }
 
     /// The tracker's window list changed: follow a watched window's
@@ -480,6 +526,7 @@ final class ConnectionHandler: ChannelInboundHandler {
             }
         }
         guard inputGate.rateLimiter.allow(now: Date().timeIntervalSince1970) else { return }
+        if case .pointer = ev { lastPointerInputAt = Date() }
         if let records = inputGate.translator.translate(ev) {
             input.send(records)
         }
