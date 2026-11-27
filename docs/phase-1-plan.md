@@ -763,3 +763,16 @@ injection is solid and held-state release is proven).
   ProtectKernelModules, ProtectClock all fail 218/CAPABILITIES under
   the user manager and are documented as not-set instead).
   swift test 40/40; loopback-e2e + real-app-roundtrip all pass.
+
+- [x] **2026-11-27 — audit functional bugs (S-E, S-F, S18/S-H)**: wire
+  scroll coordinates honored — translator emits the op-1 move ahead of
+  op-2 scroll clicks (helper coalescing flushes pending move first);
+  AltGr-level chars (keymap levels 2/3) route through the scratch
+  keycode so @{}~€µ²³ etc. type correctly without modifier juggling;
+  serve_selection now answers TIMESTAMP with the real ownership stamp
+  (server_time() property-append probe + XSetSelectionOwner real time,
+  XFixes selection_timestamp overrides). Verified on :21: scrollspy
+  recorded clicks at (400,300) from a (100,100) start; `de` layout
+  `@{[]}\~€µ²³` round-tripped byte-exact through Mousepad; TIMESTAMP
+  nonzero and advanced with a fresh .set. swift test 40/40;
+  loopback-e2e + real-app-roundtrip pass.

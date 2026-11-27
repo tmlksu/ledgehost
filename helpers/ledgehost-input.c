@@ -350,11 +350,12 @@ static void op_text(const unsigned char *p, int n)
  * content identical to it, is never reported. */
 
 static Atom a_clip, a_utf8, a_targets, a_text_utf8, a_text_plain,
-    a_text, a_timestamp, a_prop;
+    a_text, a_timestamp, a_prop, a_time;
 static Window clip_win;
 static unsigned char *set_text;         /* device text we own, or NULL */
 static long set_len;
 static Window clip_owner;               /* last seen CLIPBOARD owner */
+static Time clip_own_time;              /* stamp served for TIMESTAMP (audit S18/S-H) */
 static int xfixes_ev_base = -1;
 static int conv_pending;                /* a conversion request is out */
 static int conv_recheck;                /* owner moved while converting */
@@ -429,7 +430,10 @@ static void serve_selection(XSelectionRequestEvent *req)
                         PropModeReplace, (unsigned char *)list, 7);
         ev.property = prop;
     } else if (req->target == a_timestamp) {
-        Time t = 0;
+        /* ICCCM 2.2: TIMESTAMP answers the time ownership was taken,
+         * not 0 — pedantic requestors reject a zero stamp (audit
+         * S18/S-H). */
+        Time t = clip_own_time;
         XChangeProperty(dpy, req->requestor, prop, XA_INTEGER, 32,
                         PropModeReplace, (unsigned char *)&t, 1);
         ev.property = prop;
@@ -446,6 +450,23 @@ static void serve_selection(XSelectionRequestEvent *req)
     XSendEvent(dpy, req->requestor, False, 0, (XEvent *)&ev);
 }
 
+/* A real X server timestamp: round-trip a zero-length property append
+ * on clip_win and take its PropertyNotify stamp — CurrentTime would
+ * produce a TIMESTAMP of 0, which pedantic requestors reject (audit
+ * S18/S-H). */
+static Time server_time(void)
+{
+    XChangeProperty(dpy, clip_win, a_time, XA_STRING, 8, PropModeAppend,
+                    (unsigned char *)"", 0);
+    XSync(dpy, False);
+    XEvent ev;
+    while (XCheckWindowEvent(dpy, clip_win, PropertyChangeMask, &ev))
+        if (ev.xproperty.atom == a_time &&
+            ev.xproperty.state == PropertyNewValue)
+            return ev.xproperty.time;
+    return 0;
+}
+
 static void fetch_clipboard_text(void)
 {
     if (conv_pending) { conv_recheck = 1; return; }
@@ -456,6 +477,9 @@ static void fetch_clipboard_text(void)
     conv_deadline = now_sec() + 2.0;
     cdbg("fetch: asking owner %lu for %s", (unsigned long)clip_owner,
          atom_name(a_utf8));
+    /* CurrentTime is correct here: ICCCM wants the triggering event's
+     * stamp, but our trigger is an async XFixes notify, not a user
+     * event — there is no honest stamp to pass. */
     XConvertSelection(dpy, a_clip, a_utf8, a_prop, clip_win, CurrentTime);
     XFlush(dpy);
 }
@@ -529,8 +553,13 @@ static void drain_x_events(void)
             /* subtype 0 (owner set) names the new owner; subtype 1
              * (owner's window destroyed) can hand ownership to a
              * clipboard manager — ask the server for the truth. */
-            if (se->selection == a_clip && se->subtype == 0)
+            if (se->selection == a_clip && se->subtype == 0) {
+                /* The server's own ownership stamp beats our
+                 * server_time() estimate — keep TIMESTAMP serving it. */
+                if (se->owner == clip_win)
+                    clip_own_time = se->selection_timestamp;
                 owner_moved(se->owner);
+            }
             else if (se->selection == a_clip && se->subtype == 1)
                 owner_moved(XGetSelectionOwner(dpy, a_clip));
         } else if (ev.type == SelectionRequest) {
@@ -553,6 +582,7 @@ static void clipboard_init(void)
     a_text_plain = XInternAtom(dpy, "text/plain", False);
     a_text = XInternAtom(dpy, "TEXT", False);
     a_prop = XInternAtom(dpy, "LEDGEHOST_CLIPBOARD", False);
+    a_time = XInternAtom(dpy, "LEDGEHOST_TIMEPROBE", False);
     clip_win = XCreateSimpleWindow(dpy, DefaultRootWindow(dpy), 0, 0, 1, 1,
                                  0, 0, 0);
     clip_dbg = getenv("LH_CLIP_DEBUG") != NULL;
@@ -587,7 +617,13 @@ static void op_clipboard(const unsigned char *p, int n)
     set_text = malloc(n);
     if (!set_text) return;
     memcpy(set_text, p, n); set_len = n;
-    XSetSelectionOwner(dpy, a_clip, clip_win, CurrentTime);
+    /* Take ownership with a real server stamp (audit S18/S-H): it is
+     * both the argument validity window X uses and the value we serve
+     * for TIMESTAMP requests. CurrentTime (0) would leave TIMESTAMP
+     * unanswered in effect. */
+    Time t = server_time();
+    clip_own_time = t;
+    XSetSelectionOwner(dpy, a_clip, clip_win, t);
     clip_owner = clip_win;
     XFlush(dpy);
     logf("clipboard: %d byte(s) owned from device", n);
