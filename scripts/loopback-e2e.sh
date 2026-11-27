@@ -30,7 +30,10 @@ wait_log() {  # file, pattern, seconds
 export XDG_CONFIG_HOME="$work/host"
 "$bin/ledgehostd" "$port" > "$work/host.log" 2>&1 &
 HOSTPID=$!
-wait_log "$work/host.log" "listening on port" 120
+# Pairing readiness is the first code line, not "listening": the door
+# opens as soon as it binds, while the first secret is still being
+# derived on the pairing queue (~10 s in debug).
+wait_log "$work/host.log" "code [0-9]" 120
 code=$(grep -o 'code [0-9 ]*' "$work/host.log" | head -1 | sed 's/code //' | tr -d ' ')
 fp1=$(grep -o 'fingerprint [A-Za-z0-9_-]*' "$work/host.log" | head -1 | awk '{print $2}')
 echo "host up: code $code fingerprint $fp1"
