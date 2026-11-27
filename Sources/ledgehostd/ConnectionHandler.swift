@@ -1,0 +1,492 @@
+import Foundation
+import Crypto
+import NIO
+import NIOCore
+import NIOSSL
+import NIOTLS
+import StreamProtocol
+import LedgehostCore
+
+// The session layer (audit R1/R-1): the registry that owns session
+// state and the per-connection state machine — awaitingGate → pairing
+// | awaitingHello → session → done. Wire parsing, deadlines, input
+// arbitration, media wiring and clipboard fan-out all hang off this
+// file; Catalog.swift carries the catalog/settings replies and
+// ClipboardRelay.swift the kind 32 handling.
+
+// MARK: - Session registry
+
+/// Every session handler runs on the single event loop, so the
+/// registry needs no locking. It also owns the injector slot
+/// (decision 10): only the session that most recently selected the
+/// desktop may inject input.
+final class SessionRegistry {
+    var sessions: [ObjectIdentifier: ConnectionHandler] = [:]
+
+    /// Open sill-pair/1 connections (audit S5/F3-lite): the pairing door
+    /// is unauthenticated, so its concurrency is capped — extra
+    /// connections are refused at handshake time. Sessions that leave
+    /// the pairing state or die decrement this.
+    var pairingDoors = 0
+    static let maxPairingDoors = 4
+
+    var watchers: [ConnectionHandler] { sessions.values.filter { $0.watchingDesktop } }
+
+    var maxWantedFPS: Int {
+        watchers.map { $0.watcher.wantedFPS }.max() ?? 60
+    }
+}
+
+extension SessionRegistry {
+    /// The one serialized input stream (decision 10): only the session
+    /// that most recently selected the desktop injects.
+    var injector: ConnectionHandler? {
+        get { injectorStorage }
+        set { injectorStorage = newValue }
+    }
+}
+private var injectorStorage: ConnectionHandler?
+
+/// A small arrow PNG for the one static cursorShape (kind 14) sent on
+/// selectSource (decision 5; whether the client can draw a usable
+/// pointer from it is observed in P1-M3).
+let cursorPNG = Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAVUlEQVR4nKXQ2woAIAgD0P3/Ty96KLpoOR0EPayDBgBEMawi7KkgHMkiXJNBeEZFLkBFTEBBXCAKfYEf5BWt857gvEf2n8DyQP9EoyghXiG1TmS6LQ15ZQEO0cXuMgAAAABJRU5ErkJggg==")!
+
+// MARK: - Connection state machine
+
+final class ConnectionHandler: ChannelInboundHandler {
+    typealias InboundIn = ByteBuffer
+    typealias OutboundOut = ByteBuffer
+
+    enum State {
+        case awaitingGate
+        case pairing          // sill-pair/1: one kind 19, one kind 20, close
+        case awaitingHello    // sill/1, pinned: the first message must be Hello
+        case session
+        case done
+    }
+
+    private let peer: PeerBox
+    private var state: State = .awaitingGate
+    private var buffer = Data()
+    private var tick: RepeatedTask?
+    /// Deadline for whichever pre-session wait is current: TLS handshake,
+    /// pair request, or first Hello (audit S5/F3-lite/F12). Reused so a
+    /// connection can never hold more than one pending deadline.
+    private var deadline: Scheduled<()>?
+    private weak var channel: Channel?
+    /// This connection holds a pairing-door slot (audit S5 cap).
+    private var holdsPairingDoor = false
+    /// Bounded per-message logging (audit S6/F5).
+    private var inputLog = LogSampler()
+    var msgLog = LogSampler()
+    var label = "?"
+    var watchingDesktop = false
+    var watcher = MediaService.Watcher()
+    /// kind 32: this connection asked for the host's copies.
+    var clipboardSubscribed = false
+    /// Timestamps of the connection's kind 32s taken in the last
+    /// second (ClipboardPolicy.hostReceives' rate state).
+    var clipboardArrivals: [Double] = []
+
+    init(peer: PeerBox) { self.peer = peer }
+
+    var key: ObjectIdentifier { ObjectIdentifier(self) }
+    var peerFingerprint: Data? { peer.fingerprint }
+
+    /// Deliver one already-built message buffer (media fan-out).
+    func deliver(_ buf: ByteBuffer) {
+        channel?.writeAndFlush(buf, promise: nil)
+    }
+
+    func writeNoFlush(_ buf: ByteBuffer) { channel?.write(buf, promise: nil) }
+
+    func closeSoon() { channel?.close(promise: nil) }
+
+    /// Byte-accounted backpressure (decision 4): when the channel's
+    /// outbound buffer passes the high-water mark the session drops AUs;
+    /// on becoming writable it rejoins via kind 0 + the next IDR.
+    private func updateDropping() {
+        guard let channel, watchingDesktop else { return }
+        if !channel.isWritable && watcher.state == .live {
+            watcher.state = .dropping
+            print(Log.stamp(), "ledgehostd: session \(label) over the water mark — dropping AUs, forcing IDR")
+            media.requestKeyframe()
+        } else if channel.isWritable && watcher.state == .dropping {
+            watcher.state = .needsIDR
+            print(Log.stamp(), "ledgehostd: session \(label) writable again — rejoin on next IDR")
+        }
+    }
+
+    func userInboundEventTriggered(context: ChannelHandlerContext, event: Any) {
+        if let tlsEvent = event as? TLSUserEvent, case .handshakeCompleted(let negotiated) = tlsEvent {
+            deadline?.cancel()          // TLS handshake deadline served
+            guard let fp = peer.fingerprint else {
+                context.close(promise: nil); return
+            }
+            switch negotiated {
+            case "sill-pair/1":
+                // Cap concurrent unauthenticated doors (audit S5/F3-lite):
+                // a connect flood may not hold unbounded handshake slots.
+                guard registry.pairingDoors < SessionRegistry.maxPairingDoors else {
+                    print(Log.stamp(), "ledgehostd: pairing door busy (\(registry.pairingDoors) open) — refusing extra connection")
+                    context.close(promise: nil); return
+                }
+                registry.pairingDoors += 1
+                holdsPairingDoor = true
+                state = .pairing
+                // 30 s, not the protocol's nominal 10: a debug-build
+                // client spends ~11 s deriving the 600k-round pairing
+                // key before it can send its one message. Still a
+                // bounded half-open window for the door-hardening the
+                // timeout exists for.
+                deadline = context.eventLoop.scheduleTask(in: .seconds(30)) { [weak self] in
+                    guard let self, self.state == .pairing else { return }
+                    print(Log.stamp(), "ledgehostd: pairing connection timed out")
+                    context.close(promise: nil)
+                }
+            case "sill/1":
+                if pins.isPinned(fp) {
+                    state = .awaitingHello
+                    print(Log.stamp(), "ledgehostd: session from paired \(RemoteIdentityShortName(fp))")
+                    // A pinned client that never says Hello holds a
+                    // slot forever otherwise (audit S5/F12).
+                    deadline = context.eventLoop.scheduleTask(in: .seconds(60)) { [weak self] in
+                        guard let self, self.state == .awaitingHello else { return }
+                        print(Log.stamp(), "ledgehostd: no Hello within 60 s — closing")
+                        context.close(promise: nil)
+                    }
+                } else {
+                    print(Log.stamp(), "ledgehostd: session from unpaired \(RemoteIdentityShortName(fp)) — closing")
+                    context.close(promise: nil)
+                }
+            default:
+                context.close(promise: nil)
+            }
+        }
+        context.fireUserInboundEventTriggered(event)
+    }
+
+    func channelRead(context: ChannelHandlerContext, data: NIOAny) {
+        var buf = unwrapInboundIn(data)
+        if let bytes = buf.readBytes(length: buf.readableBytes) { buffer.append(contentsOf: bytes) }
+        drain(context: context)
+    }
+
+    private func drain(context: ChannelHandlerContext) {
+        while state != .done {
+            guard buffer.count >= StreamMessage.headerLength,
+                  let header = StreamMessage.parseHeader(buffer) else { return }
+            let cap = state == .pairing ? StreamMessage.maxPairingPayload : StreamMessage.maxClientPayload
+            guard header.payloadLength <= cap else {
+                print(Log.stamp(), "ledgehostd: payload over the cap (\(header.payloadLength) > \(cap)) — closing")
+                context.close(promise: nil); state = .done; return
+            }
+            guard buffer.count >= StreamMessage.headerLength + header.payloadLength else { return }
+            let payload = buffer.subdata(in: buffer.startIndex + StreamMessage.headerLength
+                                         ..< buffer.startIndex + StreamMessage.headerLength + header.payloadLength)
+            buffer.removeSubrange(buffer.startIndex..<buffer.startIndex + StreamMessage.headerLength + header.payloadLength)
+            handle(context: context, kind: header.kind, payload: payload)
+        }
+    }
+
+    func send(context: ChannelHandlerContext, kind: StreamMessageKind, payload: Data,
+              keyframe: Bool = false) {
+        let message = StreamMessage(kind: kind, timestamp: Date().timeIntervalSince1970,
+                                    isKeyframe: keyframe, payload: payload)
+        var out = context.channel.allocator.buffer(capacity: message.serialized().count)
+        out.writeBytes(message.serialized())
+        context.writeAndFlush(wrapOutboundOut(out), promise: nil)
+    }
+
+    /// Same, for call sites outside channel callbacks (registry fan-out
+    /// uses deliver() on already-built buffers instead).
+    func send(kind: StreamMessageKind, payload: Data, keyframe: Bool = false) {
+        guard let channel else { return }
+        var out = channel.allocator.buffer(capacity: payload.count + StreamMessage.headerLength)
+        let message = StreamMessage(kind: kind, timestamp: Date().timeIntervalSince1970,
+                                    isKeyframe: keyframe, payload: payload)
+        out.writeBytes(message.serialized())
+        channel.writeAndFlush(out, promise: nil)
+    }
+
+    private func handle(context: ChannelHandlerContext, kind: StreamMessageKind, payload: Data) {
+        switch state {
+        case .pairing:
+            deadline?.cancel()
+            if holdsPairingDoor { registry.pairingDoors -= 1; holdsPairingDoor = false }
+            state = .done
+            guard kind == .pairRequest, let request = Wire.decode(PairRequest.self, from: payload),
+                  let fp = peer.fingerprint else {
+                context.close(promise: nil); return
+            }
+            let result = pairing.answer(request, deviceFingerprint: fp)
+            send(context: context, kind: .pairResult, payload: Wire.encode(result))
+            context.close(promise: nil)
+
+        case .awaitingHello:
+            deadline?.cancel()          // Hello arrived (or the payload proves it won't)
+            guard kind == .hello, let hello = Wire.decode(Hello.self, from: payload) else {
+                print(Log.stamp(), "ledgehostd: session's first message was not a Hello — closing")
+                context.close(promise: nil); state = .done; return
+            }
+            print(Log.stamp(), "ledgehostd: hello: app \(hello.appVersion ?? "?") protocol \(hello.protocol ?? -1) device \(hello.device ?? "?") audio \(hello.audio ?? [])")
+            label = SafeText.label(hello.device ?? "?", limit: 32)
+            state = .session
+            registry.sessions[key] = self
+            sendCatalog(context: context)
+            tick = context.eventLoop.scheduleRepeatedTask(initialDelay: .seconds(10), delay: .seconds(10)) { [weak self] _ in
+                guard let self, self.state == .session else { return }
+                self.send(context: context, kind: .tick, payload: Data())
+                // Poll the water mark too — writabilityChanged alone is
+                // transition-driven; a stalled reader must be caught.
+                self.updateDropping()
+            }
+
+        case .session:
+            switch kind {
+            case .ping:
+                send(context: context, kind: .pong, payload: payload)
+            case .selectSource:
+                handleSelectSource(context: context, payload: payload)
+            case .viewport:
+                handleViewport(payload: payload)
+            case .keyframeRequest:
+                // At most one a second per connection (the wire rule);
+                // the service coalesces forced IDRs globally at 250 ms.
+                if Date().timeIntervalSince(watcher.lastKeyframeRequest) >= 1 {
+                    watcher.lastKeyframeRequest = Date()
+                    media.requestKeyframe()
+                }
+            case .clientStats:
+                if let stats = Wire.decode(ClientStats.self, from: payload),
+                   let held = msgLog.emit() {
+                    let more = held > 0 ? " (+\(held) held)" : ""
+                    print(Log.stamp(), "ledgehostd: stats \(label): fps \(stats.fps) frameAge \(stats.frameAgeMs) ms rtt \(stats.rttMs) ms\(more)")
+                }
+            case .input:
+                handleInput(payload: payload)
+            case .clipboard:
+                handleClipboard(context: context, payload: payload)
+            case .changeSettings:
+                handleChangeSettings(context: context, payload: payload)
+            case .pairingWanted:
+                if msgLog.emit() != nil {
+                    print(Log.stamp(), "ledgehostd: pairingWanted on a session — ignored")
+                }
+            default:
+                if msgLog.emit() != nil {
+                    print(Log.stamp(), "ledgehostd: session message kind \(kind.rawValue) (\(payload.count) bytes)")
+                }
+            }
+
+        case .awaitingGate, .done:
+            break
+        }
+    }
+
+    // MARK: selectSource / viewport / settings
+
+    private func handleSelectSource(context: ChannelHandlerContext, payload: Data) {
+        guard let source = Wire.decode(StreamSource.self, from: payload) else {
+            print(Log.stamp(), "ledgehostd: selectSource: undecodable payload — ignored")
+            return
+        }
+        switch source {
+        case .desktop:
+            print(Log.stamp(), "ledgehostd: \(label) selected the desktop")
+            if registry.injector !== self && registry.injector != nil {
+                // Arbitration moved: release what the previous injector
+                // held before the new one takes over.
+                input.releaseHeld()
+                print(Log.stamp(), "ledgehostd: input injector -> \(label)")
+            }
+            registry.injector = self
+            if !watchingDesktop {
+                watchingDesktop = true
+                watcher = MediaService.Watcher()       // .needsIDR
+                try? channel?.setOption(ChannelOptions.writeBufferWaterMark,
+                                        value: .init(low: MediaService.highWaterBytes / 2,
+                                                     high: MediaService.highWaterBytes))
+                send(context: context, kind: .cursorShape,
+                     payload: CursorShapeBlob.encode(hotspot: CGPoint(x: 0, y: 0),
+                                                     size: CGSize(width: 16, height: 16),
+                                                     png: cursorPNG))
+                if let sets = media.setsPayload {
+                    send(context: context, kind: .parameterSets, payload: sets,
+                         keyframe: true)
+                }
+                media.watcherJoined()
+                input.watcherJoined()
+                media.requestKeyframe()
+            }
+            sendWindowList(context: context, active: .desktop)
+        case .none:
+            if watchingDesktop {
+                watchingDesktop = false
+                if registry.injector === self {
+                    registry.injector = nil
+                    input.releaseHeld()
+                }
+                media.watcherLeft(hasWatchers: !registry.watchers.isEmpty)
+                input.watcherLeft(hasWatchers: !registry.watchers.isEmpty)
+                print(Log.stamp(), "ledgehostd: \(label) unselected the desktop")
+            }
+            sendWindowList(context: context, active: .none)
+        case .window(let id):
+            // This host lists no windows; the client re-asserts the
+            // current source through the list.
+            print(Log.stamp(), "ledgehostd: \(label) selected window \(id) — no windows on this host")
+            sendWindowList(context: context, active: watchingDesktop ? .desktop : .none)
+        }
+    }
+
+    /// kind 8 → op records for the input helper. Only the injector
+    /// session (most recent .desktop selector) may inject — the gate
+    /// runs BEFORE any logging (audit S6/F5: per-event logging before
+    /// arbitration is a journal-flood surface); events are rate-capped
+    /// at 240/s and validated by the translator before they reach
+    /// XTest. Logging shows the SHAPE only — event kind, HID usage,
+    /// modifier bits — never text payloads, and is bounded by
+    /// LogSampler. Double fields are formatted via the trap-safe
+    /// ViewportBounds.number — an Int() conversion here was the S1/F1
+    /// daemon-crash primitive.
+    private func handleInput(payload: Data) {
+        guard let ev = Wire.decode(InputEvent.self, from: payload) else { return }
+        guard registry.injector === self else { return }
+        if let held = inputLog.emit() {
+            let more = held > 0 ? " (+\(held) held)" : ""
+            switch ev {
+            case .pointer(let a, let x, let y):
+                print(Log.stamp(), "ledgehostd: input \(label): pointer \(a.rawValue) x\(ViewportBounds.number(x))y\(ViewportBounds.number(y))\(more)")
+            case .scroll(_, _, let dx, let dy):
+                print(Log.stamp(), "ledgehostd: input \(label): scroll dx\(ViewportBounds.number(dx)) dy\(ViewportBounds.number(dy))\(more)")
+            case .text(let s):
+                print(Log.stamp(), "ledgehostd: input \(label): text (n=\(s.utf8.count))\(more)")
+            case .key(let u, let d, let m):
+                print(Log.stamp(), "ledgehostd: input \(label): key hid=0x\(String(u, radix: 16)) down=\(d) mods=0x\(String(m, radix: 16))\(more)")
+            case .scrollGesture(let phase, _, _):
+                print(Log.stamp(), "ledgehostd: input \(label): scrollGesture \(phase.rawValue)\(more)")
+            }
+        }
+        guard watcher.rateLimiter.allow(now: Date().timeIntervalSince1970) else { return }
+        if let records = watcher.translator.translate(ev) {
+            input.send(records)
+        }
+    }
+
+    private func handleViewport(payload: Data) {
+        guard let v = Wire.decode(Viewport.self, from: payload) else {
+            print(Log.stamp(), "ledgehostd: viewport from \(label): undecodable — ignored")
+            return
+        }
+        if let why = ViewportBounds.refusal(v) {
+            if msgLog.emit() != nil {
+                print(Log.stamp(), "ledgehostd: viewport from \(label) refused: \(why)")
+            }
+            return
+        }
+        let wanted = min(max(v.fps ?? 60, 24), settings.maxFPS)
+        if wanted != watcher.wantedFPS {
+            watcher.wantedFPS = wanted
+            print(Log.stamp(), "ledgehostd: \(label) wants \(wanted) fps (stream max \(registry.maxWantedFPS))")
+            if registry.maxWantedFPS != media.runningInfo.fps {
+                media.restart()
+            }
+        }
+    }
+
+    private func handleChangeSettings(context: ChannelHandlerContext, payload: Data) {
+        guard let change = Wire.decode(HostSettingsChange.self, from: payload) else {
+            print(Log.stamp(), "ledgehostd: changeSettings from \(label): undecodable — ignored")
+            return
+        }
+        // Whitelist against SettingsChoices (the contract). Fields this
+        // host cannot honour keep their advertised values in the answer:
+        // virtualDisplay is advertised unavailable, and directWireless /
+        // sendAudio are advertised absent (nil), so a device showing
+        // those rows never sends them; if one arrives anyway it is
+        // ignored and the answer still carries the advertised value.
+        var applied: [String] = []
+        if let v = change.maxFPS, SettingsChoices.maxFPS.contains(v) {
+            if settings.maxFPS != v {
+                settings.maxFPS = v
+                applied.append("maxFPS=\(v)")
+            }
+        }
+        if let v = change.bitrate, SettingsChoices.bitrate.contains(v) {
+            if settings.bitrate != v {
+                settings.bitrate = v
+                applied.append("bitrate=\(v)")
+            }
+        }
+        if let v = change.captureScale, SettingsChoices.captureScale.contains(v) {
+            if settings.captureScale != v {
+                settings.captureScale = v
+                applied.append("captureScale=\(v) (no effect on X capture)")
+            }
+        }
+        if let v = change.prioritizeSpeed {
+            settings.prioritizeSpeed = v
+            applied.append("prioritizeSpeed=\(v)")
+        }
+        var ignored: [String] = []
+        if change.virtualDisplay != nil { ignored.append("virtualDisplay (unavailable on this host)") }
+        if change.directWireless != nil { ignored.append("directWireless (not a setting here)") }
+        if change.sendAudio != nil { ignored.append("sendAudio (no audio on this host)") }
+        // Apply: bitrate retunes the encoder live (decision 12); a new
+        // fps ceiling re-clamps each watcher's rate and restarts the
+        // pipeline via the standard kind 0 + IDR rejoin path.
+        if let v = change.bitrate, SettingsChoices.bitrate.contains(v) {
+            media.setBitrate(v)
+        }
+        if applied.contains(where: { $0.hasPrefix("maxFPS") }) {
+            for w in registry.watchers { w.watcher.wantedFPS = min(w.watcher.wantedFPS, settings.maxFPS) }
+            if registry.maxWantedFPS != media.runningInfo.fps { media.restart() }
+        }
+        print(Log.stamp(), "ledgehostd: \(label) changed settings: \(applied.isEmpty ? "none applied" : applied.joined(separator: " "))\(ignored.isEmpty ? "" : " — ignored: \(ignored.joined(separator: ", "))")")
+        send(context: context, kind: .hostSettings, payload: Wire.encode(settingsState(answering: change.token)))
+    }
+
+    func channelActive(context: ChannelHandlerContext) {
+        channel = context.channel
+        label = peer.fingerprint.map { RemoteIdentityShortName($0) } ?? context.channel.remoteAddress.map { "\($0)" } ?? "?"
+        // Bound the TLS handshake (audit S5/F3-lite): crypto runs on this
+        // same event loop, so an unfinished handshake cannot idle here.
+        deadline = context.eventLoop.scheduleTask(in: .seconds(15)) { [weak self] in
+            guard let self, self.state == .awaitingGate else { return }
+            print(Log.stamp(), "ledgehostd: TLS handshake deadline — closing")
+            context.close(promise: nil)
+        }
+        context.fireChannelActive()
+    }
+
+    func channelWritabilityChanged(context: ChannelHandlerContext) {
+        updateDropping()
+        context.fireChannelWritabilityChanged()
+    }
+
+    func channelInactive(context: ChannelHandlerContext) {
+        tick?.cancel()
+        deadline?.cancel()
+        if holdsPairingDoor { registry.pairingDoors -= 1; holdsPairingDoor = false }
+        if watchingDesktop {
+            watchingDesktop = false
+            if registry.injector === self {
+                registry.injector = nil
+                input.releaseHeld()
+            }
+            media.watcherLeft(hasWatchers: !registry.watchers.isEmpty)
+            input.watcherLeft(hasWatchers: !registry.watchers.isEmpty)
+        }
+        clipboardSubscribed = false
+        clipboardArrivals = []
+        registry.sessions.removeValue(forKey: key)
+        context.fireChannelInactive()
+    }
+
+    func errorCaught(context: ChannelHandlerContext, error: Error) {
+        print(Log.stamp(), "ledgehostd: connection error \(error)")
+        context.close(promise: nil)
+    }
+}
