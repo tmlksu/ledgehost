@@ -428,13 +428,17 @@ final class ConnectionHandler: ChannelInboundHandler {
         // those rows never sends them; if one arrives anyway it is
         // ignored and the answer still carries the advertised value.
         var applied: [String] = []
+        var fpsChanged = false            // audit R-9: tracked, not prefix-matched
+        var bitrateToApply: Int?          // whitelist once, use twice
         if let v = change.maxFPS, SettingsChoices.maxFPS.contains(v) {
             if settings.maxFPS != v {
                 settings.maxFPS = v
                 applied.append("maxFPS=\(v)")
+                fpsChanged = true
             }
         }
         if let v = change.bitrate, SettingsChoices.bitrate.contains(v) {
+            bitrateToApply = v
             if settings.bitrate != v {
                 settings.bitrate = v
                 applied.append("bitrate=\(v)")
@@ -457,10 +461,10 @@ final class ConnectionHandler: ChannelInboundHandler {
         // Apply: bitrate retunes the encoder live (decision 12); a new
         // fps ceiling re-clamps each watcher's rate and restarts the
         // pipeline via the standard kind 0 + IDR rejoin path.
-        if let v = change.bitrate, SettingsChoices.bitrate.contains(v) {
+        if let v = bitrateToApply {
             media.setBitrate(v)
         }
-        if applied.contains(where: { $0.hasPrefix("maxFPS") }) {
+        if fpsChanged {
             for w in registry.watchers { w.inputGate.wantedFPS = min(w.inputGate.wantedFPS, settings.maxFPS) }
             if registry.maxWantedFPS != media.runningInfo.fps { media.restart() }
         }
