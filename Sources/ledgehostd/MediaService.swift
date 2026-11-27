@@ -24,14 +24,15 @@ final class MediaService {
         case dropping      // over the write water mark: AUs dropped
     }
 
+    /// Per-session MEDIA state only (audit R7): resume position and
+    /// the keyframe-request rate state. Input translation, input rate
+    /// limiting and the fps preference live on the connection
+    /// (ConnectionHandler.inputGate).
     struct Watcher {
         var state: ResumeState = .needsIDR
-        var wantedFPS: Int = 60
         var lastKeyframeRequest: Date = .distantPast
         var droppedAUs: Int = 0
         var resumedAUs: Int = 0
-        var translator = InputTranslator()
-        var rateLimiter = InputRateLimiter()
     }
 
     struct RunningInfo { var width: Int = 0, height: Int = 0, fps: Int = 0, mbps: Int = 0 }

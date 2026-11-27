@@ -33,7 +33,7 @@ final class SessionRegistry {
     var watchers: [ConnectionHandler] { sessions.values.filter { $0.watchingDesktop } }
 
     var maxWantedFPS: Int {
-        watchers.map { $0.watcher.wantedFPS }.max() ?? 60
+        watchers.map { $0.inputGate.wantedFPS }.max() ?? 60
     }
 }
 
@@ -46,6 +46,16 @@ extension SessionRegistry {
     }
 }
 private var injectorStorage: ConnectionHandler?
+
+/// Per-session input state (audit R7): the wire-event translator, the
+/// 240/s rate limiter and the viewport fps preference are the
+/// connection's business — MediaService.Watcher keeps only media
+/// resume state.
+struct InputGate {
+    var translator = InputTranslator()
+    var rateLimiter = InputRateLimiter()
+    var wantedFPS = 60
+}
 
 /// A small arrow PNG for the one static cursorShape (kind 14) sent on
 /// selectSource (decision 5; whether the client can draw a usable
@@ -83,6 +93,7 @@ final class ConnectionHandler: ChannelInboundHandler {
     var label = "?"
     var watchingDesktop = false
     var watcher = MediaService.Watcher()
+    var inputGate = InputGate()
     /// kind 32: this connection asked for the host's copies.
     var clipboardSubscribed = false
     /// Timestamps of the connection's kind 32s taken in the last
@@ -308,6 +319,7 @@ final class ConnectionHandler: ChannelInboundHandler {
             if !watchingDesktop {
                 watchingDesktop = true
                 watcher = MediaService.Watcher()       // .needsIDR
+                inputGate = InputGate()
                 try? channel?.setOption(ChannelOptions.writeBufferWaterMark,
                                         value: .init(low: MediaService.highWaterBytes / 2,
                                                      high: MediaService.highWaterBytes))
@@ -372,8 +384,8 @@ final class ConnectionHandler: ChannelInboundHandler {
                 print(Log.stamp(), "ledgehostd: input \(label): scrollGesture \(phase.rawValue)\(more)")
             }
         }
-        guard watcher.rateLimiter.allow(now: Date().timeIntervalSince1970) else { return }
-        if let records = watcher.translator.translate(ev) {
+        guard inputGate.rateLimiter.allow(now: Date().timeIntervalSince1970) else { return }
+        if let records = inputGate.translator.translate(ev) {
             input.send(records)
         }
     }
@@ -390,8 +402,8 @@ final class ConnectionHandler: ChannelInboundHandler {
             return
         }
         let wanted = min(max(v.fps ?? 60, 24), settings.maxFPS)
-        if wanted != watcher.wantedFPS {
-            watcher.wantedFPS = wanted
+        if wanted != inputGate.wantedFPS {
+            inputGate.wantedFPS = wanted
             print(Log.stamp(), "ledgehostd: \(label) wants \(wanted) fps (stream max \(registry.maxWantedFPS))")
             if registry.maxWantedFPS != media.runningInfo.fps {
                 media.restart()
@@ -444,7 +456,7 @@ final class ConnectionHandler: ChannelInboundHandler {
             media.setBitrate(v)
         }
         if applied.contains(where: { $0.hasPrefix("maxFPS") }) {
-            for w in registry.watchers { w.watcher.wantedFPS = min(w.watcher.wantedFPS, settings.maxFPS) }
+            for w in registry.watchers { w.inputGate.wantedFPS = min(w.inputGate.wantedFPS, settings.maxFPS) }
             if registry.maxWantedFPS != media.runningInfo.fps { media.restart() }
         }
         print(Log.stamp(), "ledgehostd: \(label) changed settings: \(applied.isEmpty ? "none applied" : applied.joined(separator: " "))\(ignored.isEmpty ? "" : " — ignored: \(ignored.joined(separator: ", "))")")
