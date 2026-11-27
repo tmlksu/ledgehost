@@ -159,6 +159,46 @@ static void release_all(void)
 
 /* MARK: scratch keycode (decision 8: reset at startup and exit) */
 
+/* Keymap cache (audit Fable P-2 / SWE-2 P5): one XGetKeyboardMapping
+ * result reused across characters instead of a synchronous round-trip
+ * per char. A MappingNotify covering more than our scratch keycode is
+ * an external layout change (setxkbmap & friends) and refetches the
+ * whole map; scratch-keycode-only notifies and our own remaps just
+ * patch that one cached row, so a run of scratch characters costs no
+ * round-trips at all. */
+static KeySym *km_map;
+static int km_per;
+static int km_dirty = 1;
+static KeySym scratch_sym;              /* what we last put on scratch_kc */
+
+static const KeySym *keymap(void)
+{
+    if (!km_map || km_dirty) {
+        if (km_map) XFree(km_map);
+        km_map = XGetKeyboardMapping(dpy, min_kc, max_kc - min_kc + 1, &km_per);
+        km_dirty = 0;
+    }
+    return km_map;
+}
+
+static void km_patch_scratch(KeySym sym)
+{
+    if (km_map && scratch_kc >= min_kc && scratch_kc <= max_kc) {
+        KeySym *row = km_map + (scratch_kc - min_kc) * km_per;
+        row[0] = sym;
+        for (int l = 1; l < km_per; l++) row[l] = NoSymbol;
+    }
+}
+
+/* Minimum spacing between a scratch remap and the press that uses it.
+ * 0.030 s was chosen from a ~15 ms measured absorption floor on this
+ * host (clients must see the MappingNotify before the KeyPress); kept
+ * after the P-2 cache — see the audit batch report for the numbers.
+ * -D overridable for measurement builds. */
+#ifndef SCRATCH_GAP
+#define SCRATCH_GAP 0.030
+#endif
+
 static int scratch_live;                /* scratch_kc holds a keysym */
 
 static void scratch_reset_force(int force)
@@ -168,6 +208,8 @@ static void scratch_reset_force(int force)
         XChangeKeyboardMapping(dpy, scratch_kc, 1, &none, 1);
         XSync(dpy, False);
         scratch_live = 0;
+        scratch_sym = 0;
+        km_patch_scratch(NoSymbol);
     }
 }
 
@@ -179,6 +221,8 @@ static void scratch_set(KeySym sym)
     XChangeKeyboardMapping(dpy, scratch_kc, 1, syms, 1);
     XSync(dpy, False);      /* the keymap must be live before we press */
     scratch_live = 1;
+    scratch_sym = sym;
+    km_patch_scratch(sym);  /* own remap: patch the row, keep the cache */
 }
 
 /* MARK: text typing
@@ -219,17 +263,15 @@ static void type_char(unsigned int cp)
     KeySym sym = char_keysym(cp);
     if (!sym) return;
 
-    /* search the keymap for the keysym and its level */
-    int per = 0;
-    KeySym *map = XGetKeyboardMapping(dpy, min_kc, max_kc - min_kc + 1, &per);
+    /* search the cached keymap for the keysym and its level */
+    const KeySym *map = keymap();
     int found_kc = 0, level = 0;
     if (map) {
         for (int kc = min_kc; kc <= max_kc && !found_kc; kc++)
-            for (int l = 0; l < per && l < 4; l++)
-                if (map[(kc - min_kc) * per + l] == sym) {
+            for (int l = 0; l < km_per && l < 4; l++)
+                if (map[(kc - min_kc) * km_per + l] == sym) {
                     found_kc = kc; level = l; break;
                 }
-        XFree(map);
     }
     last_type_ms = now_sec();
     /* Levels 2/3 (the ISO_Level3_Shift / AltGr layer — @, {}, € on
@@ -254,14 +296,16 @@ static void type_char(unsigned int cp)
          * Restoring immediately races that lookup and the press
          * resolves to NoSymbol (or the next char's keysym). */
         /* the consumer must absorb both the press before us and our
-         * remap before it looks up this keycode */
+         * remap before it looks up this keycode. SCRATCH_GAP is the
+         * measured client-absorption floor plus margin (audit P-2;
+         * -D overridable for floor measurement builds). */
         double t = now_sec();
         double since = last_scratch_ms > last_type_ms
                      ? t - last_scratch_ms : t - last_type_ms;
         double gap = since;
-        if (gap < 0.030) {
+        if (gap < SCRATCH_GAP) {
             struct timespec ts;
-            ts.tv_sec = 0; ts.tv_nsec = (long)((0.030 - gap) * 1e9);
+            ts.tv_sec = 0; ts.tv_nsec = (long)((SCRATCH_GAP - gap) * 1e9);
             nanosleep(&ts, NULL);
         }
         scratch_set(sym);
@@ -566,6 +610,18 @@ static void drain_x_events(void)
             }
             else if (se->selection == a_clip && se->subtype == 1)
                 owner_moved(XGetSelectionOwner(dpy, a_clip));
+        } else if (ev.type == MappingNotify) {
+            /* someone (possibly a layout switch via setxkbmap) changed
+             * the keymap: refresh Xlib's copy and drop ours (P-2). A
+             * notify covering only scratch_kc is our own remap coming
+             * back — re-patch the row instead of a full refetch. */
+            XRefreshKeyboardMapping(&ev.xmapping);
+            if (ev.xmapping.request == MappingKeyboard &&
+                scratch_kc && ev.xmapping.first_keycode == scratch_kc &&
+                ev.xmapping.count == 1)
+                km_patch_scratch(scratch_sym);
+            else
+                km_dirty = 1;
         } else if (ev.type == SelectionRequest) {
             serve_selection(&ev.xselectionrequest);
         } else if (ev.type == SelectionNotify) {
