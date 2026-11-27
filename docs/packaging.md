@@ -35,10 +35,27 @@ through an overlay network (docs/remote-access-plan.md). Same drop-in:
     Environment=LH_REMOTE_ADDRESS=w.x.y.z  # host devices dial (no port)
     # Environment=LH_REMOTE_DIAL_PORT=443  # only if a forwarder maps it
     # Environment=LH_REMOTE_VIA="VPN"      # display string (default VPN)
+    # Environment=LH_REMOTE_BITRATE_KBPS=6000   # remote start bitrate (default 6000, 0 = home default)
 
 Unset `LH_REMOTE_PORT` disables remote access entirely — no second
 listener. Any malformed value fails the daemon at startup (loudly, in
 the journal) rather than silently disabling the door.
+
+`LH_REMOTE_BITRATE_KBPS` sets the INITIAL encoder bitrate of a media
+pipeline created by a remote-door session: the LAN-tuned 15 Mbps start
+overruns a thin overlay path, so remote-created pipelines start lower.
+It applies only at pipeline creation — media pipelines are shared per
+capture source, so the door of the session that FIRST selects a source
+decides the spawn value; a `changeSettings` from any viewer retunes
+the running pipeline as usual. `0` opts out (remote sessions start at
+the home default too).
+
+## Admin CLI
+
+`ledgehost-admin` (installed next to the daemon) talks to the daemon's
+admin socket at `<configDir>/admin.sock`: `status`, `code [--new]`,
+`devices`, `revoke <prefix>` — see docs/admin.md. The site unit needs
+`--config` only if it sets a custom `XDG_CONFIG_HOME`.
 
 ## The linger requirement
 

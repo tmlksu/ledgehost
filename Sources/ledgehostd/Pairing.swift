@@ -22,6 +22,13 @@ final class PairingManager {
     private var codeKey: SymmetricKey?
     private var qrSecret: Data = Data()
     private var triesLeft: Int = 0
+    /// When the current credentials were issued. The expiry check
+    /// (`rotateIfExpired`) measures code age from this — every rotation
+    /// source (expiry, success, tries exhausted, `code --new`) resets
+    /// the clock, so each code lives a full `codeTTL` no matter what
+    /// issued it.
+    private var credentialsIssuedAt = Date()
+    static let codeTTL: TimeInterval = 600
 
     init(identity: HostIdentity, pins: PinStore, port: Int) {
         self.identity = identity
@@ -54,9 +61,32 @@ final class PairingManager {
         codeKey = PairingProof.codeKey(code: code, macFingerprint: identity.fingerprint)
         qrSecret = Data(secret)
         triesLeft = Self.maxTries
+        credentialsIssuedAt = Date()
         // Code only, never the link: the QR secret is a
         // live credential and must not land in the persistent journal.
         print(Log.stamp(), "pairing: code \(PairingCode.grouped(code))")
+    }
+
+    /// The live pairing code and its remaining validity, for the admin
+    /// socket's `code` command — the value returned is the very secret
+    /// the pairing door accepts right now (nil while the door is
+    /// closed by a failed generation).
+    func currentCode() -> (code: String, secondsLeft: Int)? {
+        lock.lock(); defer { lock.unlock() }
+        guard codeKey != nil else { return nil }
+        let left = Self.codeTTL - Date().timeIntervalSince(credentialsIssuedAt)
+        return (code, max(0, Int(left.rounded(.up))))
+    }
+
+    /// Age-based expiry, called on a frequent timer from main: an
+    /// immediate rotation via `code --new` or a successful pairing
+    /// restarts the TTL clock — the timer no longer expires codes on a
+    /// fixed cadence mid-window.
+    func rotateIfExpired() {
+        lock.lock()
+        let expired = Date().timeIntervalSince(credentialsIssuedAt) >= Self.codeTTL
+        lock.unlock()
+        if expired { rotate() }
     }
 
     /// Per-source proof-failure throttle:

@@ -150,6 +150,14 @@ struct PinFile: Codable {
     var devices: [Device]
 }
 
+/// A paired device as stored (fingerprint is the base64url encoding).
+public struct PairedDevice {
+    public let fingerprint: String
+    public let name: String
+    public let model: String?
+    public let pairedAt: Double
+}
+
 public final class PinStore {
     private let url: URL
     private let lock = NSLock()
@@ -192,6 +200,23 @@ public final class PinStore {
         lock.lock(); defer { lock.unlock() }
         file.devices.removeAll { $0.fingerprint == Base64URL.encode(fingerprint) }
         try atomicWrite(JSONEncoder().encode(file), to: url)
+    }
+
+    /// Revoke by the stored base64url encoding (the admin revoke path
+    /// resolves a prefix to the full string first).
+    public func remove(encoded fingerprint: String) throws {
+        lock.lock(); defer { lock.unlock() }
+        file.devices.removeAll { $0.fingerprint == fingerprint }
+        try atomicWrite(JSONEncoder().encode(file), to: url)
+    }
+
+    /// Snapshot of the pin list for the admin `devices` command.
+    public func devices() -> [PairedDevice] {
+        lock.lock(); defer { lock.unlock() }
+        return file.devices.map {
+            PairedDevice(fingerprint: $0.fingerprint, name: $0.name,
+                         model: $0.model, pairedAt: $0.pairedAt)
+        }
     }
 
     public var count: Int { lock.lock(); defer { lock.unlock() }; return file.devices.count }

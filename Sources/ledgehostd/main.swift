@@ -98,6 +98,7 @@ let targetDisplay = processEnv["DISPLAY"] ?? ""
 let media = MediaService(group: group,
                          display: targetDisplay,
                          xauthority: processEnv["XAUTHORITY"],
+                         remoteBitrateKbps: remoteConfig?.bitrateKbps,
                          fpsSource: { registry.maxWantedFPS(of: $0) })
 let input = InputService(group: group,
                          display: targetDisplay,
@@ -186,8 +187,11 @@ defer {
 // Pairing credential expiry: while unpaired a printed
 // code stays valid indefinitely, so code + QR secret rotate on a timer
 // independent of pairing attempts — a code's lifetime is ≤ 10 min.
-eventLoop.scheduleRepeatedTask(initialDelay: .seconds(600), delay: .seconds(600)) { _ in
-    pairing.rotate()
+// The check is age-based (rotateIfExpired): an immediate rotation via
+// `code --new` or a successful pairing restarts the clock — the code
+// gets a full 10 min instead of dying at the next fixed tick.
+eventLoop.scheduleRepeatedTask(initialDelay: .seconds(30), delay: .seconds(30)) { _ in
+    pairing.rotateIfExpired()
 }
 
 // Live revocation: re-read the pin store every 2 s; a fingerprint that
@@ -220,9 +224,21 @@ if let remoteConfig {
           + "(dial \(remoteConfig.address):\(remoteConfig.dialPort) via \(remoteConfig.via))")
 }
 
-// Clean shutdown: stop advertising, close the listener.
+// The admin door: a unix socket in the config dir (docs/admin.md).
+// Optional — a socket that cannot be created is a loud log, not a
+// serving failure.
+var admin: AdminServer?
+do {
+    admin = try AdminServer(configDir: configDir)
+} catch {
+    print(Log.stamp(), "ledgehostd: ADMIN SOCKET UNAVAILABLE — \(error) (daemon continues without it)")
+}
+defer { admin?.stop() }
+
+// Clean shutdown: stop advertising, close the listeners.
 let cleanup: @convention(c) (Int32) -> Void = { _ in
     avahi?.terminate()
+    admin?.stop()
     exit(0)
 }
 signal(SIGINT, cleanup)

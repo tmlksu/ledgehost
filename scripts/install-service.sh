@@ -105,6 +105,7 @@ install_one() {
     echo "install-service: $libdir/$name"
 }
 install_one "$repo/.build/release/ledgehostd" ledgehostd
+install_one "$repo/.build/release/ledgehost-admin" ledgehost-admin
 install_one "$repo/bin/ledgehost-media" ledgehost-media
 install_one "$repo/bin/ledgehost-input" ledgehost-input
 

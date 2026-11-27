@@ -21,6 +21,7 @@ let package = Package(
         .executable(name: "tls-spike", targets: ["tls-spike"]),
         .executable(name: "ledgehostd", targets: ["ledgehostd"]),
         .executable(name: "ledgehost-probe", targets: ["ledgehost-probe"]),
+        .executable(name: "ledgehost-admin", targets: ["ledgehost-admin"]),
     ],
     dependencies: [
         .package(url: "https://github.com/apple/swift-crypto.git", from: "3.5.0"),
@@ -89,6 +90,14 @@ let package = Package(
                 .product(name: "NIOTLS", package: "swift-nio"),
             ],
             path: "Sources/ledgehost-probe"
+        ),
+        .executableTarget(
+            name: "ledgehost-admin",
+            dependencies: [
+                "LedgehostCore",
+                "StreamProtocol",
+            ],
+            path: "Sources/ledgehost-admin"
         ),
         .testTarget(
             name: "StreamProtocolTests",
