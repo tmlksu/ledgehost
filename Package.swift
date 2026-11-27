@@ -58,6 +58,7 @@ let package = Package(
             name: "LedgehostCore",
             dependencies: [
                 "StreamProtocol",
+                "SillLinuxShims",
                 .product(name: "Crypto", package: "swift-crypto"),
             ],
             path: "Sources/LedgehostCore"

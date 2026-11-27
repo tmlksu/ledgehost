@@ -1,12 +1,15 @@
 import Foundation
+import Crypto
+import StreamProtocol
+import SillLinuxShims
 #if canImport(Glibc)
 import Glibc
 #endif
 
 // Store plumbing shared by the daemon and the probe (audit R4/R-3):
 // the config-directory rule and the atomic write must be identical in
-// both processes. The higher-level stores (HostIdentity, PinStore)
-// live with the daemon until the test seam needs them (R-8).
+// both processes. HostIdentity and PinStore live here too so the R-8
+// unit tests can reach them (executable targets are not testable).
 
 public enum StoreError: Error {
     case corrupt(String)
@@ -56,4 +59,170 @@ public func atomicWrite(_ data: Data, to url: URL) throws {
 public func readIfExists(_ url: URL) throws -> Data? {
     guard FileManager.default.fileExists(atPath: url.path) else { return nil }
     return try Data(contentsOf: url)
+}
+
+// MARK: - Logging
+
+/// Timestamped print used by the daemon and probe.
+public enum Log {
+    private static let formatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "HH:mm:ss"
+        return f
+    }()
+    public static func stamp() -> String { formatter.string(from: Date()) }
+}
+
+// MARK: - Host identity
+
+// Identity and pin storage (M2). One directory, two JSON files, both
+// written atomically (temp file + fsync + rename) with tight
+// permissions: a silently regenerated identity would break every pin
+// a device holds, so a corrupt file is a loud failure, never a reset.
+
+struct IdentityFile: Codable {
+    var version: Int
+    /// X9.63 private key (97 bytes), standard base64.
+    var keyX963: String
+    /// 32 bytes, standard base64.
+    var recognitionKey: String
+    var name: String
+}
+
+public final class HostIdentity {
+    public let privateKey: P256.Signing.PrivateKey
+    public let certificateDER: Data
+    public let fingerprint: Data
+    public let macID: String
+    public let recognitionKey: Data
+    public let name: String
+    public let launchID: String
+
+    private init(file: IdentityFile) throws {
+        guard let keyData = Data(base64Encoded: file.keyX963),
+              let key = RemoteKey.importPrivate(keyData),
+              let rk = Data(base64Encoded: file.recognitionKey), rk.count == 32,
+              let der = SelfSignedCertificate.make(key: key) else {
+            throw StoreError.corrupt("identity file does not decode to a usable P-256 identity")
+        }
+        privateKey = key
+        certificateDER = der
+        fingerprint = SPKI.fingerprint(of: key)
+        macID = MacID.make(fingerprint: fingerprint)
+        recognitionKey = rk
+        name = file.name
+        launchID = UUID().uuidString
+    }
+
+    public static func loadOrCreate(in dir: URL) throws -> HostIdentity {
+        try ensureDirectory(dir)
+        let url = dir.appendingPathComponent("identity.json")
+        if let data = try readIfExists(url) {
+            guard let file = try? JSONDecoder().decode(IdentityFile.self, from: data), file.version == 1 else {
+                throw StoreError.corrupt("identity.json is unreadable; refusing to regenerate (every device pin would break)")
+            }
+            return try HostIdentity(file: file)
+        }
+        let key = RemoteKey.generate()
+        var rk = [UInt8](repeating: 0, count: 32)
+        _ = Random.fill(&rk)
+        let name = ProcessInfo.processInfo.hostName
+        let file = IdentityFile(version: 1,
+                                keyX963: RemoteKey.export(key).base64EncodedString(),
+                                recognitionKey: Data(rk).base64EncodedString(),
+                                name: name)
+        try atomicWrite(JSONEncoder().encode(file), to: url)
+        return try HostIdentity(file: file)
+    }
+}
+
+// MARK: - Pins (paired devices)
+
+struct PinFile: Codable {
+    struct Device: Codable {
+        /// base64url fingerprint of the device's key.
+        var fingerprint: String
+        var name: String
+        var model: String?
+        var pairedAt: Double
+    }
+    var version: Int
+    var devices: [Device]
+}
+
+public final class PinStore {
+    private let url: URL
+    private let lock = NSLock()
+    private var file: PinFile
+
+    /// Test seam (audit R-8): reload-failure reporting is injectable so
+    /// the once-per-episode logging is observable without capturing
+    /// stdout. Production callers leave the default print.
+    var log: (String) -> Void = { print(Log.stamp(), $0) }
+
+    public init(in dir: URL) throws {
+        url = dir.appendingPathComponent("paired.json")
+        if let data = try readIfExists(url) {
+            guard let decoded = try? JSONDecoder().decode(PinFile.self, from: data), decoded.version == 1 else {
+                throw StoreError.corrupt("paired.json is unreadable")
+            }
+            file = decoded
+        } else {
+            file = PinFile(version: 1, devices: [])
+        }
+    }
+
+    public func isPinned(_ fingerprint: Data) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return file.devices.contains { $0.fingerprint == Base64URL.encode(fingerprint) }
+    }
+
+    public func add(fingerprint: Data, name: String, model: String?) throws {
+        lock.lock(); defer { lock.unlock() }
+        let entry = PinFile.Device(fingerprint: Base64URL.encode(fingerprint),
+                                   name: SafeText.label(name, limit: 64),
+                                   model: model,
+                                   pairedAt: Date().timeIntervalSince1970)
+        file.devices.removeAll { $0.fingerprint == entry.fingerprint }
+        file.devices.append(entry)
+        try atomicWrite(JSONEncoder().encode(file), to: url)
+    }
+
+    public func remove(fingerprint: Data) throws {
+        lock.lock(); defer { lock.unlock() }
+        file.devices.removeAll { $0.fingerprint == Base64URL.encode(fingerprint) }
+        try atomicWrite(JSONEncoder().encode(file), to: url)
+    }
+
+    public var count: Int { lock.lock(); defer { lock.unlock() }; return file.devices.count }
+
+    /// Re-read paired.json if it changed on disk (the unpair path writes
+    /// it from another process) — the live-revocation watch in main.
+    /// A read/parse failure keeps the last pin set (the fail-open-for-
+    /// availability tradeoff) but is logged once per episode (audit S12)
+    /// so a missed revocation window is diagnosable.
+    public func reload() {
+        lock.lock(); defer { lock.unlock() }
+        var data: Data?
+        do { data = try readIfExists(url) } catch { noteReloadFailure("unreadable"); return }
+        guard let data else { clearReloadFailure(); return }
+        guard let decoded = try? JSONDecoder().decode(PinFile.self, from: data),
+              decoded.version == 1 else { noteReloadFailure("unparseable"); return }
+        file = decoded
+        clearReloadFailure()
+    }
+
+    private var reloadFailing = false
+    private func noteReloadFailure(_ what: String) {
+        if !reloadFailing {
+            reloadFailing = true
+            log("ledgehostd: paired.json reload failed (\(what)) — keeping the last pin set")
+        }
+    }
+    private func clearReloadFailure() {
+        if reloadFailing {
+            reloadFailing = false
+            log("ledgehostd: paired.json reads cleanly again")
+        }
+    }
 }

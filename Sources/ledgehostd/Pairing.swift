@@ -1,6 +1,7 @@
 import Foundation
 import Crypto
 import StreamProtocol
+import LedgehostCore
 import SillLinuxShims
 
 // The pairing window (M3): one current code and one current QR secret,
