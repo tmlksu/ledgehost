@@ -21,6 +21,10 @@ public enum InputRecord {
     public static let opReset: UInt8 = 6
     /// Device text -> host CLIPBOARD selection.
     public static let opClipboard: UInt8 = 7
+    /// Subscriber count for foreign-clipboard reports (audit S-B):
+    /// the helper skips XConvertSelection fetches and record-1 emits
+    /// while it is 0.
+    public static let opClipboardWatch: UInt8 = 8
     /// Helper -> daemon record op: the CLIPBOARD selection's text
     /// changed under a foreign owner. (stdin ops and stdout records
     /// share the framing, not the op namespace.)
@@ -103,6 +107,11 @@ public enum InputRecord {
     /// A device's clipboard text: the helper validates UTF-8 length.
     public static func clipboard(_ text: String) -> Data {
         record(op: opClipboard, body: Data(text.utf8))
+    }
+
+    /// op 8: how many sessions subscribe to foreign-clipboard reports.
+    public static func clipboardWatch(_ count: Int) -> Data {
+        record(op: opClipboardWatch, body: Data([UInt8(min(max(count, 0), 255))]))
     }
 
     /// Helper -> daemon stdout framing as a FramedReader layout

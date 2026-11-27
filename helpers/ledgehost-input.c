@@ -13,6 +13,9 @@
  *   5 release-all  6 reset (drop all state)
  *   7 set clipboard  UTF-8 text (<= 256 KiB); the helper takes the
  *              CLIPBOARD selection and serves it
+ *   8 clipboard watch  count(1) — sessions subscribed to op-1 reports
+ *              (audit S-B); while 0 the helper tracks the owner but
+ *              never XConvertSelection-fetches and never emits
  * stdout carries the same framing in the helper -> daemon direction:
  *   op 1 clipboard changed  UTF-8 text of a CLIPBOARD selection made
  *              by another X client (never what the helper itself set)
@@ -365,6 +368,8 @@ static double conv_deadline;            /* conv_pending expires at this time, or
 static double conv_retry_at;            /* armed re-fetch timer, or 0 */
 static int conv_retries;                /* retries spent on this owner */
 static int clip_dbg = -1;               /* LH_CLIP_DEBUG: verbose decisions */
+static int clip_watch;                  /* op 8: sessions subscribed to copy reports
+                                         * (audit S-B); 0 = fetch nothing, emit nothing */
 
 #define cdbg(...) do { if (clip_dbg) {         fprintf(stderr, "input: clipdbg: " __VA_ARGS__);         fputc('\n', stderr); } } while (0)
 
@@ -486,6 +491,9 @@ static void owner_moved(Window owner)
     conv_retries = 0;
     conv_retry_at = 0;
     if (owner == clip_win || owner == None) return;
+    /* Nobody subscribed: note the owner but do not fetch — a busy
+     * selection must not cost quarter-megabyte reads (audit S-B). */
+    if (!clip_watch) { cdbg("owner moved, no subscribers — not fetching"); return; }
     fetch_clipboard_text();
 }
 
@@ -519,7 +527,9 @@ static void got_selection_text(XSelectionEvent *sel)
                 } else
                     cdbg("fetch: empty/odd reply (fmt=%d n=%lu) — giving up", fmt, n);
             } else if (after == 0 && n > 0 && n <= LH_CLIP_MAX) {
-                if (!(set_text && n == (unsigned long)set_len &&
+                if (!clip_watch) {
+                    cdbg("fetch: %lu byte(s) arrived but subscribers left — not emitted", n);
+                } else if (!(set_text && n == (unsigned long)set_len &&
                       memcmp(data, set_text, n) == 0)) {
                     cdbg("fetch: got %lu byte(s) of %s — reporting", n,
                          atom_name(type));
@@ -728,6 +738,8 @@ int main(void)
             case 5: release_all(); break;
             case 6: release_all(); scroll_acc_x = scroll_acc_y = 0; break;
             case 7: op_clipboard(body + 1, len - 1); break;
+            case 8: clip_watch = len > 1 ? body[1] : 0;
+                    cdbg("watch: %d subscriber(s)", clip_watch); break;
             default: logf("reject: unknown op %d", op); break;
             }
         }

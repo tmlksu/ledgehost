@@ -24,7 +24,11 @@
                                             StreamMessage.maxFramePayload */
 
 /* ---- daemon -> ledgehost-input stdin, op records ---- */
-/* Record: length(4, BE) + body of that many bytes = op(1) + fields. */
+/* Record: length(4, BE) + body of that many bytes = op(1) + fields.
+ * The op table itself is documented in ledgehost-input.c's spec
+ * comment and named by InputRecord.op* in InputRecords.swift —
+ * currently ops 1-8, with op 8 carrying the clipboard-subscriber
+ * count (audit S-B). */
 #define LH_INPUT_HEADER_LEN  4           /* IPCLimits.inputHeaderLength */
 
 /* Clipboard text bound: == IPCLimits.clipboardTextMax ==

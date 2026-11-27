@@ -39,6 +39,15 @@ func wireClipboardRelay() {
     }
 }
 
+/// The current kind-32 subscriber count, pushed to the input helper
+/// (op 8) after every change (audit S-B): while it is 0 the helper
+/// does not issue XConvertSelection fetches or emit record-1s — a busy
+/// selection costs nothing when nobody is listening.
+func pushClipboardWatch() {
+    let n = registry.sessions.values.reduce(0) { $0 + ($1.clipboardSubscribed ? 1 : 0) }
+    input.setClipboardWatch(n)
+}
+
 extension ConnectionHandler {
     /// kind 32 clipboard (ClipboardPolicy): a decodable message
     /// subscribes; a non-empty text becomes the host clipboard and is
@@ -56,9 +65,12 @@ extension ConnectionHandler {
             if !clipboardSubscribed {
                 clipboardSubscribed = true
                 print(Log.stamp(), "ledgehostd: \(label) subscribed to the clipboard")
+                pushClipboardWatch()
             }
         case .set(let text):
+            let wasSubscribed = clipboardSubscribed
             clipboardSubscribed = true
+            if !wasSubscribed { pushClipboardWatch() }
             print(Log.stamp(), "ledgehostd: \(label) set the clipboard (\(text.utf8.count) bytes)")
             deviceSetText = text          // echo suppression, defence in depth
             input.setClipboard(text)
@@ -74,6 +86,7 @@ extension ConnectionHandler {
             if clipboardSubscribed {
                 clipboardSubscribed = false
                 print(Log.stamp(), "ledgehostd: \(label) unsubscribed from the clipboard")
+                pushClipboardWatch()
             }
         case .refuse(let why):
             if msgLog.emit() != nil {

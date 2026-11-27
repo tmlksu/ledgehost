@@ -504,9 +504,11 @@ final class ConnectionHandler: ChannelInboundHandler {
             media.watcherLeft(hasWatchers: !registry.watchers.isEmpty)
             input.watcherLeft(hasWatchers: !registry.watchers.isEmpty)
         }
+        let wasSubscribed = clipboardSubscribed
         clipboardSubscribed = false
         clipboardArrivals = []
         registry.sessions.removeValue(forKey: key)
+        if wasSubscribed { pushClipboardWatch() }
         context.fireChannelInactive()
     }
 
