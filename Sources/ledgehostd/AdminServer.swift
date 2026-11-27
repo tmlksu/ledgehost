@@ -138,7 +138,7 @@ final class AdminHandler: ChannelInboundHandler {
                 if request.new == true {
                     // `code --new` runs the same rotation the pairing
                     // door's own expiry/success paths use — the old
-                    // code is dead the moment rotateLocked() returns.
+                    // code is dead the moment rotate() kills it.
                     pairing.rotate()
                     print(Log.stamp(), "ledgehostd: admin: code --new — rotated")
                 }
@@ -146,9 +146,18 @@ final class AdminHandler: ChannelInboundHandler {
                     print(Log.stamp(), "ledgehostd: admin: code — answered over the socket")
                     respond(AdminProtocol.ok(["code": live.code,
                                               "secondsLeft": live.secondsLeft]))
+                } else if request.new == true {
+                    // --new just killed the old code: its replacement
+                    // is deriving on the pairing queue — the request
+                    // itself succeeded.
+                    print(Log.stamp(), "ledgehostd: admin: code --new — rotating")
+                    respond(AdminProtocol.ok(["rotating": true]))
                 } else {
+                    // nil = no live code: a rotation's derivation is
+                    // still running, or generation failed — either way
+                    // the door is closed for now.
                     print(Log.stamp(), "ledgehostd: admin: code — pairing door closed")
-                    respond(AdminProtocol.err("pairing door is closed (credential generation failed)"))
+                    respond(AdminProtocol.err("pairing door is closed (rotation in flight or generation failed)"))
                 }
             case .devices:
                 let list = pins.devices().map {

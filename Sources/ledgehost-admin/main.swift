@@ -155,7 +155,11 @@ case "status":
     print("paired     \(obj["pairedDevices"] ?? "?") device(s), "
           + "sessions  \(obj["activeSessions"] ?? "?")")
 case "code":
-    print("code \(obj["code"] ?? "?")   valid ~\(obj["secondsLeft"] ?? "?") s")
+    if obj["rotating"] as? Bool == true {
+        print("rotating — the old code is dead; the new one is being derived (a few seconds)")
+    } else {
+        print("code \(obj["code"] ?? "?")   valid ~\(obj["secondsLeft"] ?? "?") s")
+    }
 case "devices":
     guard let list = obj["devices"] as? [[String: Any]] else { fail("malformed devices reply") }
     if list.isEmpty { print("no paired devices") }

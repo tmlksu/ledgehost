@@ -30,6 +30,15 @@ final class PairingManager {
     private var credentialsIssuedAt = Date()
     static let codeTTL: TimeInterval = 600
 
+    /// The 600k-round PBKDF2 derivation (~seconds) never runs on the
+    /// session event loop: it happens on this serial queue and the new
+    /// credentials swap in under `lock` when it lands. At most one
+    /// derivation is in flight — a request arriving mid-derivation
+    /// coalesces into exactly one follow-up run.
+    private static let deriveQueue = DispatchQueue(label: "ledgehost.pairing.derive")
+    private var deriveInFlight = false
+    private var rotateAgain = false
+
     init(identity: HostIdentity, pins: PinStore, port: Int) {
         self.identity = identity
         self.pins = pins
@@ -37,40 +46,66 @@ final class PairingManager {
         rotate()
     }
 
+    /// Rotate now (admin `code --new`, init): the old code dies
+    /// immediately — `code --new` means the old one is burnt — and the
+    /// door answers `closed` until the new secret lands.
     func rotate() {
         lock.lock(); defer { lock.unlock() }
-        rotateLocked()
+        code = ""; codeKey = nil; qrSecret = Data(); triesLeft = 0
+        requestRotationLocked()
     }
 
-    private func rotateLocked() {
-        // Fail closed: a failed RNG must never leave a
-        // known code or a zero QR secret in force — with codeKey nil
-        // every proof answer is `closed`.
-        guard let newCode = PairingCode.generate() else {
-            code = ""; codeKey = nil; qrSecret = Data(); triesLeft = 0
-            print(Log.stamp(), "pairing: code generation failed — pairing door closed until the next rotation")
-            return
-        }
+    /// Kill the live credentials while the lock is held (success,
+    /// tries exhausted): the paired code is dead the moment the caller
+    /// returns, per the door's fail-closed rule.
+    private func expireCredentialsLocked() {
+        code = ""; codeKey = nil; qrSecret = Data(); triesLeft = 0
+        requestRotationLocked()
+    }
+
+    /// `lock` must be held. Schedules one background derivation, or
+    /// folds the request into the one already running.
+    private func requestRotationLocked() {
+        if deriveInFlight { rotateAgain = true; return }
+        deriveInFlight = true
+        Self.deriveQueue.async { [weak self] in self?.deriveAndSwap() }
+    }
+
+    /// Generate the credentials OFF the lock — the PBKDF2 lives here —
+    /// then swap them in atomically. A rotation requested
+    /// mid-derivation runs once more after this one; bursts never
+    /// queue a backlog of derivations.
+    private func deriveAndSwap() {
+        let newCode = PairingCode.generate()
         var secret = [UInt8](repeating: 0, count: 16)
-        guard Random.fill(&secret) else {
+        let ok = newCode != nil && Random.fill(&secret)
+        let newKey = ok ? PairingProof.codeKey(code: newCode!, macFingerprint: identity.fingerprint) : nil
+        lock.lock(); defer { lock.unlock() }
+        if let newCode, let newKey, ok {
+            code = newCode; codeKey = newKey; qrSecret = Data(secret)
+            triesLeft = Self.maxTries
+            credentialsIssuedAt = Date()
+            // Code only, never the link: the QR secret is a
+            // live credential and must not land in the persistent journal.
+            print(Log.stamp(), "pairing: code \(PairingCode.grouped(code))")
+        } else {
+            // Fail closed: a failed RNG must never leave a
+            // known code or a zero QR secret in force — with codeKey nil
+            // every proof answer is `closed`.
             code = ""; codeKey = nil; qrSecret = Data(); triesLeft = 0
-            print(Log.stamp(), "pairing: RNG failed — pairing door closed until the next rotation")
-            return
+            print(Log.stamp(), "pairing: credential generation failed — pairing door closed until the next rotation")
         }
-        code = newCode
-        codeKey = PairingProof.codeKey(code: code, macFingerprint: identity.fingerprint)
-        qrSecret = Data(secret)
-        triesLeft = Self.maxTries
-        credentialsIssuedAt = Date()
-        // Code only, never the link: the QR secret is a
-        // live credential and must not land in the persistent journal.
-        print(Log.stamp(), "pairing: code \(PairingCode.grouped(code))")
+        deriveInFlight = false
+        if rotateAgain {
+            rotateAgain = false
+            requestRotationLocked()
+        }
     }
 
     /// The live pairing code and its remaining validity, for the admin
     /// socket's `code` command — the value returned is the very secret
     /// the pairing door accepts right now (nil while the door is
-    /// closed by a failed generation).
+    /// closed: mid-rotation, or by a failed generation).
     func currentCode() -> (code: String, secondsLeft: Int)? {
         lock.lock(); defer { lock.unlock() }
         guard codeKey != nil else { return nil }
@@ -78,15 +113,15 @@ final class PairingManager {
         return (code, max(0, Int(left.rounded(.up))))
     }
 
-    /// Age-based expiry, called on a frequent timer from main: an
-    /// immediate rotation via `code --new` or a successful pairing
-    /// restarts the TTL clock — the timer no longer expires codes on a
-    /// fixed cadence mid-window.
+    /// Age-based expiry, called on a frequent timer from main. Unlike
+    /// a security rotation, the OLD code stays live until its
+    /// replacement is fully derived and swapped — expiry is
+    /// maintenance, not a compromise, so it leaves no dead window.
     func rotateIfExpired() {
-        lock.lock()
-        let expired = Date().timeIntervalSince(credentialsIssuedAt) >= Self.codeTTL
-        lock.unlock()
-        if expired { rotate() }
+        lock.lock(); defer { lock.unlock() }
+        if Date().timeIntervalSince(credentialsIssuedAt) >= Self.codeTTL {
+            requestRotationLocked()
+        }
     }
 
     /// Per-source proof-failure throttle:
@@ -169,7 +204,7 @@ final class PairingManager {
             }
             failures.removeValue(forKey: source)
             print(Log.stamp(), "pairing: paired \(RemoteIdentityShortName(deviceFingerprint)) (\(SafeText.label(request.name, limit: 64)))")
-            rotateLocked()
+            expireCredentialsLocked()
             return PairResult(ok: true, proof: Base64URL.encode(proofM), macID: identity.macID,
                               name: identity.name, recognitionKey: Base64URL.encode(identity.recognitionKey))
         }
@@ -177,7 +212,7 @@ final class PairingManager {
         noteFailure(source, now: Date())
         triesLeft -= 1
         let left = triesLeft
-        if triesLeft <= 0 { rotateLocked() }
+        if triesLeft <= 0 { expireCredentialsLocked() }
         return PairResult(ok: false, reason: PairResult.code, triesLeft: left)
     }
 }
