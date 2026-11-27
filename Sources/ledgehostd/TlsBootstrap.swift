@@ -27,6 +27,41 @@ final class PeerBox: @unchecked Sendable {
     var fingerprint: Data?
 }
 
+/// Per-source new-connection throttle (audit Fable F3 remainder): a
+/// token bucket keyed by remote IP applied BEFORE the TLS handler is
+/// installed, so a flooded address pays no handshake crypto.
+///   rate 1 conn/s sustained, burst 10 — legitimate use is two iPads
+///   reconnecting plus the odd service restart (≤ a handful of
+///   connects in a second, then silence); a flood is hundreds.
+/// Refusals are logged through a sampler so the flood itself cannot
+/// flood the journal. All calls run on the daemon's one event loop.
+final class ConnThrottle {
+    static let rate = 1.0           // tokens per second
+    static let burst = 10.0         // bucket capacity
+
+    private var buckets: [String: (tokens: Double, at: Date)] = [:]
+    private var lastSweep = Date.distantPast
+    private var refusedLog = LogSampler()
+
+    /// Take one connection token for `addr`; false = refuse early.
+    func allow(_ addr: String, now: Date = Date()) -> Bool {
+        // Bounded map: sweep entries idle >2 min, at most once a minute.
+        if now.timeIntervalSince(lastSweep) > 60 {
+            lastSweep = now
+            buckets = buckets.filter { now.timeIntervalSince($0.value.at) < 120 }
+        }
+        var b = buckets[addr] ?? (Self.burst, now)
+        b.tokens = min(Self.burst, b.tokens + Self.rate * now.timeIntervalSince(b.at))
+        b.at = now
+        buckets[addr] = b
+        if b.tokens >= 1 { b.tokens -= 1; buckets[addr] = b; return true }
+        if let held = refusedLog.emit() {
+            print(Log.stamp(), "ledgehostd: connections from \(addr) refused (throttled)\(held > 0 ? " — +\(held) held" : "")")
+        }
+        return false
+    }
+}
+
 /// TLS 1.3, our certificate only, both doors' ALPNs.
 func serverTLSContext(identity: HostIdentity) throws -> NIOSSLContext {
     let cert = try NIOSSLCertificate(bytes: [UInt8](identity.certificateDER), format: .der)
@@ -44,14 +79,19 @@ func serverTLSContext(identity: HostIdentity) throws -> NIOSSLContext {
     return try NIOSSLContext(configuration: tlsConfig)
 }
 
-/// Listener pipeline: TLS with the SPKI-pin callback, then the session
-/// state machine. Every accepted connection runs the daemon's one
-/// event loop.
-func makeServerBootstrap(group: EventLoopGroup, sslContext: NIOSSLContext) -> ServerBootstrap {
+/// Listener pipeline: per-source connection throttle first (audit
+/// Fable F3 — refused addresses never reach TLS), then TLS with the
+/// SPKI-pin callback, then the session state machine. Every accepted
+/// connection runs the daemon's one event loop.
+func makeServerBootstrap(group: EventLoopGroup, sslContext: NIOSSLContext,
+                         throttle: ConnThrottle) -> ServerBootstrap {
     ServerBootstrap(group: group)
         .serverChannelOption(ChannelOptions.backlog, value: 8)
         .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
         .childChannelInitializer { channel in
+            guard let ip = channel.remoteAddress?.ipAddress, throttle.allow(ip) else {
+                return channel.close()
+            }
             let peer = PeerBox()
             let callback: NIOSSLCustomVerificationCallback = { certs, promise in
                 guard let first = certs.first, let fp = peerFingerprint(first) else {

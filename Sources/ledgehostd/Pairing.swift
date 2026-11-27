@@ -59,15 +59,46 @@ final class PairingManager {
         print(Log.stamp(), "pairing: code \(PairingCode.grouped(code))")
     }
 
-    /// Answers one kind 19. `deviceFingerprint` comes from the TLS session.
-    func answer(_ request: PairRequest, deviceFingerprint: Data) -> PairResult {
+    /// Per-source proof-failure throttle (audit Fable F3 remainder):
+    /// the 5-try rotation budget is global — an address that keeps
+    /// sending wrong proofs would otherwise keep spending it via fresh
+    /// connections. After `failLimit` failed proofs inside `failWindow`
+    /// the address's proofs are refused closed WITHOUT touching
+    /// triesLeft: a legit device mistyping a code twice is unaffected,
+    /// a flood cannot burn more than `failLimit` proofs per window.
+    /// (12 ≈ two rotation budgets in ten minutes.)
+    static let failLimit = 12
+    static let failWindow: TimeInterval = 600
+    private var failures: [String: (count: Int, first: Date)] = [:]
+
+    private func throttled(_ source: String, now: Date) -> Bool {
+        guard let f = failures[source], f.count >= Self.failLimit else { return false }
+        if now.timeIntervalSince(f.first) >= Self.failWindow {
+            failures.removeValue(forKey: source)
+            return false
+        }
+        return true
+    }
+
+    private func noteFailure(_ source: String, now: Date) {
+        var f = failures[source] ?? (0, now)
+        if now.timeIntervalSince(f.first) >= Self.failWindow { f = (0, now) }
+        f.count += 1
+        failures[source] = f
+    }
+
+    /// Answers one kind 19. `deviceFingerprint` comes from the TLS session;
+    /// `source` is the remote address for the failure throttle.
+    func answer(_ request: PairRequest, deviceFingerprint: Data,
+                source: String = "?") -> PairResult {
         // A generation other than 1 is refused without counting a try.
         guard request.v == PairRequest.version else {
             return PairResult(ok: false, reason: PairResult.closed)
         }
         switch request.method {
         case PairRequest.code, PairRequest.qr:
-            return answerProof(request, deviceFingerprint: deviceFingerprint)
+            return answerProof(request, deviceFingerprint: deviceFingerprint,
+                               source: source)
         case PairRequest.ask, PairRequest.cancel:
             // Home-door conveniences of a later design step; for now the
             // door is pairing-only and the code is already on display.
@@ -77,8 +108,14 @@ final class PairingManager {
         }
     }
 
-    private func answerProof(_ request: PairRequest, deviceFingerprint: Data) -> PairResult {
+    private func answerProof(_ request: PairRequest, deviceFingerprint: Data,
+                             source: String) -> PairResult {
         lock.lock(); defer { lock.unlock() }
+        // A throttled address is refused before the rotation budget or
+        // proof verification is touched.
+        if throttled(source, now: Date()) {
+            return PairResult(ok: false, reason: PairResult.closed)
+        }
         guard let proof = Base64URL.decode(request.proof) else {
             return PairResult(ok: false, reason: PairResult.code, triesLeft: triesLeft)
         }
@@ -100,12 +137,14 @@ final class PairingManager {
                 print(Log.stamp(), "pairing: could not save the pin: \(error)")
                 return PairResult(ok: false, reason: PairResult.closed)
             }
+            failures.removeValue(forKey: source)
             print(Log.stamp(), "pairing: paired \(RemoteIdentityShortName(deviceFingerprint)) (\(SafeText.label(request.name, limit: 64)))")
             rotateLocked()
             return PairResult(ok: true, proof: Base64URL.encode(proofM), macID: identity.macID,
                               name: identity.name, recognitionKey: Base64URL.encode(identity.recognitionKey))
         }
 
+        noteFailure(source, now: Date())
         triesLeft -= 1
         let left = triesLeft
         if triesLeft <= 0 { rotateLocked() }

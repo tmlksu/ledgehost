@@ -177,7 +177,8 @@ eventLoop.scheduleRepeatedTask(initialDelay: .seconds(2), delay: .seconds(2)) { 
 }
 
 let sslContext = try serverTLSContext(identity: identity)
-let bootstrap = makeServerBootstrap(group: group, sslContext: sslContext)
+let bootstrap = makeServerBootstrap(group: group, sslContext: sslContext,
+                                    throttle: ConnThrottle())
 let server = try bootstrap.bind(host: "0.0.0.0", port: port).wait()
 print(Log.stamp(), "ledgehostd: listening on port \(port)")
 

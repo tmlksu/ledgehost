@@ -239,7 +239,8 @@ final class ConnectionHandler: ChannelInboundHandler {
                   let fp = peer.fingerprint else {
                 context.close(promise: nil); return
             }
-            let result = pairing.answer(request, deviceFingerprint: fp)
+            let result = pairing.answer(request, deviceFingerprint: fp,
+                                        source: context.channel.remoteAddress?.ipAddress ?? "?")
             send(context: context, kind: .pairResult, payload: Wire.encode(result))
             context.close(promise: nil)
 
