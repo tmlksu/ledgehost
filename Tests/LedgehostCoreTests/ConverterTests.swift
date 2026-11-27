@@ -196,3 +196,21 @@ final class KeymapTests: XCTestCase {
         }
     }
 }
+
+// IPC-constants equivalence (audit Fable R-6): pins the Swift values to
+// the numbers helpers/ledgehost-ipc.h defines — the C side cannot be
+// compiled here, so the literals ARE the cross-language static assert.
+final class IPCLimitsTests: XCTestCase {
+    func testConstantsMatchHeader() {
+        XCTAssertEqual(IPCLimits.mediaMagic, [0x4C, 0x48, 0x4D, 0x31])      // "LHM1"
+        XCTAssertEqual(IPCLimits.mediaVersion, 1)
+        XCTAssertEqual(IPCLimits.mediaHeaderLength, 20)
+        XCTAssertEqual(IPCLimits.mediaMaxPayload, 32 << 20)
+        XCTAssertEqual(IPCLimits.mediaMaxPayload, StreamMessage.maxFramePayload)
+        XCTAssertEqual(IPCLimits.inputHeaderLength, 4)
+        XCTAssertEqual(IPCLimits.clipboardTextMax, 256 * 1024)
+        XCTAssertEqual(IPCLimits.clipboardTextMax, Clipboard.maxTextBytes)
+        XCTAssertEqual(IPCLimits.inputRecordMax, 256 * 1024 + 1)
+        XCTAssertEqual(InputRecord.maxRecordBytes, IPCLimits.inputRecordMax)
+    }
+}

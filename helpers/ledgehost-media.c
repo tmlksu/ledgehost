@@ -40,9 +40,10 @@
 #include <gst/app/app.h>
 #include <gst/video/video.h>
 
-#define TAG_AU   1
-#define TAG_SETS 2
-#define MAX_PAYLOAD (32u << 20)
+#include "ledgehost-ipc.h"
+
+/* LHM1 tags/sizes come from ledgehost-ipc.h — single-sourced with the
+ * daemon's MediaRecordReader. */
 
 static GMainLoop *loop;
 static GstElement *encoder;
@@ -82,11 +83,11 @@ static int write_all(const void *buf, size_t len)
 static int write_record(int tag, int keyframe, double ts,
                         const guint8 *payload, guint32 len)
 {
-    if (len > MAX_PAYLOAD || write_failed)
+    if (len > LH_MEDIA_MAX_PAYLOAD || write_failed)
         return -1;
-    guint8 h[20];
-    memcpy(h, "LHM1", 4);
-    h[4] = 1;                                   /* version */
+    guint8 h[LH_MEDIA_HEADER_LEN];
+    memcpy(h, LH_MEDIA_MAGIC, 4);
+    h[4] = LH_MEDIA_VERSION;
     h[5] = (guint8)tag;
     h[6] = keyframe ? 1 : 0;
     h[7] = 0;
@@ -172,13 +173,13 @@ static GstFlowReturn on_sample(GstAppSink *sink, gpointer data)
             g_byte_array_unref(last_sets);
         last_sets = g_byte_array_new();
         g_byte_array_append(last_sets, sets->data, sets->len);
-        if (write_record(TAG_SETS, 0, ts, sets->data, sets->len) < 0)
+        if (write_record(LH_MEDIA_TAG_SETS, 0, ts, sets->data, sets->len) < 0)
             goto out;
     }
     g_byte_array_unref(sets);
 
     int keyframe = !GST_BUFFER_FLAG_IS_SET(buf, GST_BUFFER_FLAG_DELTA_UNIT);
-    if (write_record(TAG_AU, keyframe, ts, map.data, (guint32)map.size) < 0)
+    if (write_record(LH_MEDIA_TAG_AU, keyframe, ts, map.data, (guint32)map.size) < 0)
         goto out;
     if (want_frames > 0 && ++au_records >= (guint)want_frames)
         g_main_loop_quit(loop);

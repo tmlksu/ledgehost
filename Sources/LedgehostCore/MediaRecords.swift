@@ -30,9 +30,10 @@ public enum MediaRecordError: Error, Equatable {
 /// Incremental LHM1 reader. Feed bytes, take complete records.
 /// Validation failure throws; the caller (daemon) kills the helper.
 public struct MediaRecordReader {
-    public static let headerLength = 20
-    public static let maxPayload = 32 << 20   // wire maxFramePayload
-    public static let magic: [UInt8] = [0x4C, 0x48, 0x4D, 0x31]   // "LHM1"
+    // Constants live in IPCLimits (mirror: helpers/ledgehost-ipc.h).
+    public static let headerLength = IPCLimits.mediaHeaderLength
+    public static let maxPayload = IPCLimits.mediaMaxPayload
+    public static let magic = IPCLimits.mediaMagic
 
     private var buffer = Data()
     private let timestampWindow: Double     // seconds either side of now; 0 = unchecked
@@ -53,7 +54,7 @@ public struct MediaRecordReader {
                   b[b.startIndex + 2] == Self.magic[2], b[b.startIndex + 3] == Self.magic[3]
             else { throw MediaRecordError.badMagic }
             let version = b[b.startIndex + 4]
-            guard version == 1 else { throw MediaRecordError.badVersion(version) }
+            guard version == IPCLimits.mediaVersion else { throw MediaRecordError.badVersion(version) }
             let tagByte = b[b.startIndex + 5]
             guard let tag = MediaTag(rawValue: tagByte) else { throw MediaRecordError.badTag(tagByte) }
             let flags = b[b.startIndex + 6]

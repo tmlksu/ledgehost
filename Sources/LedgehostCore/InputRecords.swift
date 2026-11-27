@@ -33,9 +33,9 @@ public enum InputRecord {
     public static let pointerRightUp: UInt8 = 4
 
     /// Largest record the helper's stdin buffer can hold: one op byte
-    /// plus a maximal clipboard payload. Mirrors REC_MAX in
-    /// helpers/ledgehost-input.c — keep the two in sync (audit F2/S16).
-    public static let maxRecordBytes = 256 * 1024 + 1
+    /// plus a maximal clipboard payload. Mirrors LH_REC_MAX in
+    /// helpers/ledgehost-ipc.h — keep the two in sync (audit F2/S16).
+    public static let maxRecordBytes = IPCLimits.inputRecordMax
 
     public static func record(op: UInt8, body: Data = Data()) -> Data {
         var d = Data(capacity: 5 + body.count)

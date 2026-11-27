@@ -3,7 +3,7 @@
  *
  * stdin carries length-prefixed records only (a line protocol cannot
  * carry typed text):
- *   length (4, BE, <= REC_MAX below) + body: op (1) + fields
+ *   length (4, BE, <= LH_REC_MAX below) + body: op (1) + fields
  *   1 pointer  kind(1) 0=move 1=lDown 2=lUp 3=rDown 4=rUp, x(4) y(4)
  *              fractions of the frame x1e6, clamped to [0,1]
  *   2 scroll   dx(4) dy(4) fractions x1e6; the wire event's x/y arrive
@@ -37,6 +37,8 @@
 #include <X11/XKBlib.h>
 #include <X11/Xatom.h>
 #include <sys/select.h>
+
+#include "ledgehost-ipc.h"
 
 /* The devprefix carries XTest.h but not its XInput.h prerequisite, and
  * no Xrandr.h at all: declare the small ABI surface we use (libXtst.so.6
@@ -376,16 +378,8 @@ static const char *atom_name(Atom a)
     return buf;
 }
 
-#define CLIP_MAX (256 * 1024)
-
-/* Maximum valid stdin record: an op-7 (clipboard) record carries one op
- * byte + up to CLIP_MAX bytes of text. The daemon mirrors this bound as
- * InputRecord.maxRecordBytes in Sources/LedgehostCore/InputRecords.swift —
- * keep the two in sync. A record announcing len 0 or len > REC_MAX is
- * unrecoverable framing desync: the helper exits and the daemon restarts
- * it (clamping the announced length would reinterpret attacker-controlled
- * text bytes as further op records — audit F2/S16). */
-#define REC_MAX (CLIP_MAX + 1)
+/* CLIP_MAX and REC_MAX come from ledgehost-ipc.h as LH_CLIP_MAX /
+ * LH_REC_MAX — single-sourced with the daemon's InputRecord bounds. */
 
 static void write_all(int fd, const void *buf, size_t n)
 {
@@ -513,7 +507,7 @@ static void got_selection_text(XSelectionEvent *sel)
     if (sel->property != None) {
         Atom type; int fmt; unsigned long n, after; unsigned char *data = NULL;
         if (XGetWindowProperty(dpy, clip_win, sel->property, 0,
-                               CLIP_MAX / 4 + 1, True, AnyPropertyType,
+                               LH_CLIP_MAX / 4 + 1, True, AnyPropertyType,
                                &type, &fmt, &n, &after, &data) == Success
             && data) {
             if (fmt != 8 || (after == 0 && n == 0)) {
@@ -524,7 +518,7 @@ static void got_selection_text(XSelectionEvent *sel)
                          fmt, n);
                 } else
                     cdbg("fetch: empty/odd reply (fmt=%d n=%lu) — giving up", fmt, n);
-            } else if (after == 0 && n > 0 && n <= CLIP_MAX) {
+            } else if (after == 0 && n > 0 && n <= LH_CLIP_MAX) {
                 if (!(set_text && n == (unsigned long)set_len &&
                       memcmp(data, set_text, n) == 0)) {
                     cdbg("fetch: got %lu byte(s) of %s — reporting", n,
@@ -533,7 +527,7 @@ static void got_selection_text(XSelectionEvent *sel)
                 } else
                     cdbg("fetch: %lu byte(s) match device text — suppressed", n);
             } else if (after > 0)
-                logf("clipboard: dropped (over %d bytes)", CLIP_MAX);
+                logf("clipboard: dropped (over %d bytes)", LH_CLIP_MAX);
             XFree(data);
         }
         XDeleteProperty(dpy, clip_win, sel->property);
@@ -612,7 +606,7 @@ static void clipboard_poll(void)
 /* op 7: a device's text becomes the host clipboard. */
 static void op_clipboard(const unsigned char *p, int n)
 {
-    if (n < 1 || n > CLIP_MAX) { logf("drop: clipboard op bad len %d", n); return; }
+    if (n < 1 || n > LH_CLIP_MAX) { logf("drop: clipboard op bad len %d", n); return; }
     free(set_text);
     set_text = malloc(n);
     if (!set_text) return;
@@ -661,9 +655,9 @@ int main(void)
     clipboard_init();
     logf("up: keycodes %d..%d scratch %d shift %d", min_kc, max_kc, scratch_kc, shift_kc);
 
-    /* Sized to hold a whole maximal record (4-byte header + REC_MAX) so a
-     * legitimate device clipboard of CLIP_MAX bytes parses in one pass. */
-    static unsigned char buf[4 + REC_MAX];
+    /* Sized to hold a whole maximal record (4-byte header + LH_REC_MAX) so a
+     * legitimate device clipboard of LH_CLIP_MAX bytes parses in one pass. */
+    static unsigned char buf[4 + LH_REC_MAX];
     size_t have = 0;
     static unsigned char pending_move[9];
     static int pending_move_n = 0;
@@ -707,7 +701,7 @@ int main(void)
         int fatal = 0;
         while (have - off >= 5) {
             uint32_t len = (buf[off] << 24) | (buf[off+1] << 16) | (buf[off+2] << 8) | buf[off+3];
-            if (len == 0 || len > REC_MAX) {
+            if (len == 0 || len > LH_REC_MAX) {
                 /* unrecoverable desync — never clamp-and-parse
                  * (audit F2/S16); die so the daemon restarts us */
                 logf("fatal: bad record len %u", len);
