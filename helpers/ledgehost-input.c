@@ -227,7 +227,13 @@ static void type_char(unsigned int cp)
         XFree(map);
     }
     last_type_ms = now_sec();
-    if (found_kc) {
+    /* Levels 2/3 (the ISO_Level3_Shift / AltGr layer — @, {}, € on
+     * de/altgr-intl layouts, plus Shift+AltGr) fall through to the
+     * scratch remap rather than holding a level-3 modifier (audit
+     * Fable S-F): the keysym at level 0 of our scratch keycode types
+     * the exact character regardless of whether the layout even maps
+     * an AltGr key, and no modifier-state dance can leave one held. */
+    if (found_kc && level <= 1) {
         int need_shift = (level == 1);
         if (need_shift && shift_kc > 0)
             XTestFakeKeyEvent(dpy, shift_kc, True, CurrentTime);
