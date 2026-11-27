@@ -776,3 +776,24 @@ injection is solid and held-state release is proven).
   `@{[]}\~€µ²³` round-tripped byte-exact through Mousepad; TIMESTAMP
   nonzero and advanced with a fresh .set. swift test 40/40;
   loopback-e2e + real-app-roundtrip pass.
+
+- [x] **2026-11-27 — audit M-effort batch (F3, P-2/P5, P-3, S-B)**:
+  per-source connection token bucket (1/s sustained, burst 10, per
+  remote addr) + per-source pairing-failure throttle (12 fails ->
+  pairing door refused for that address; global rotation untouched)
+  verified live: 128-flood refused ~132 while a paired session kept
+  ~78 fps, 6/6 rapid legit reconnects passed; input-helper keymap
+  cached (XGetKeyboardMapping once, MappingNotify invalidation —
+  own scratch remaps patch the one cached row, foreign remaps
+  refetch; SCRATCH_GAP kept at 30 ms after re-measurement showed the
+  client-absorption floor unmoved: corrupt at <=5 ms and once at
+  10 ms, clean x3 at 12 ms on 47-char runs); clipboard op-8
+  subscriber-count pushed to the helper which gates
+  XConvertSelection+emit on >0 subscribers (proven: 0 emits
+  unsubscribed -> emit on subscribe -> silence on leave). P-3
+  capture-efficiency MEASURED on :21, no change adopted —
+  videoconvert+use-damage=false stays: CPU% / delivered au/s:
+  baseline 53.8% idle / 55.8% motion @60; use-damage=true 57.7% /
+  71.3% (pure overhead, no savings); vapostproc 76.3% / 77.3% with
+  capture->au-out latency swinging 5->318 ms and au/s sagging to 55.
+  Both alternatives lose on CPU and vapostproc also on latency.
