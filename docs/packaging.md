@@ -128,4 +128,16 @@ devices). Remove it separately only if you want a fresh pairing.
 - The daemon itself needs no X at startup: the helpers open `DISPLAY`
   per session, so the service can start before the desktop does.
 - Known gap: clipboard pausing while the session is locked is not
-  implemented (no lock-state detection on this host).
+  implemented — on this session type (remote-desktop Xfce) nothing
+  can lock the screen at all, so no lock-state signal exists to
+  watch: the session bus has no `org.freedesktop.ScreenSaver`
+  (neither light-locker nor xfce4-screensaver runs), `xflock4` has
+  no locker to invoke, and `loginctl lock-session` is inert —
+  `LockedHint` only flips when a session locker answers logind's
+  Lock signal, and none is installed. Least-bad future option: if a
+  locker is ever deployed, subscribe on the session bus for
+  `org.freedesktop.ScreenSaver.ActiveChanged` (light-locker and
+  xfce4-screensaver both emit it) and gate the clipboard relay on
+  it — an idle-time heuristic is deliberately not implemented:
+  idle != locked, and a false "locked" call silently drops
+  clipboard in both directions.

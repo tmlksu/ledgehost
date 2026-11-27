@@ -80,8 +80,21 @@ occluder absent). This server preserves window contents for xid
 capture (backing store / server-side redirection — mechanism
 unidentified, but `xprop -root _NET_WM_CM_S0` confirms no
 _NET_WM_CM_S0 owner). Conclusion: **occlusion does not show through on
-this host**; on a server without preserved contents it is a documented
-limitation of this generation — no compositing workaround is built.
+this host**.
+
+Compositor-ON recheck (2026-11-27, scratch Xvfb): xfwm4 4.18's GLX
+compositor cannot start on Xvfb — it rejects the llvmpipe renderer
+string outright, and under the alternate softpipe rasterizer the WM
+runs but the compositor silently stays off (no `_NET_WM_CM_S0`
+claim). The semantics were verified instead with a minimal
+compositing manager claiming `_NET_WM_CM_S0` and
+`CompositeRedirectAutomatic` + real bottom-to-top painting: the same
+400×300 red window half-covered by blue showed the blue occluder on
+the composited root capture, while `ximagesrc xid=<red>` returned pure
+red over the covered region — under automatic redirection the
+window's contents live in its own offscreen pixmap, which is what
+xid capture reads. **Occlusion does not leak under compositing either.**
+No compositing workaround is needed on either server configuration.
 
 ## Pipeline-per-source model
 

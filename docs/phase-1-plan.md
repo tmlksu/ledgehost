@@ -654,7 +654,9 @@ injection is solid and held-state release is proven).
   (e) stop ended delivery ("-> 0 subscriber(s)"). Known
   gap vs upstream: the locked-pause (host locked ->
   clipboard paused) is not implemented — this host has no
-  lock-state detection. Real-client acceptance still open:
+  lock-state detection (packaging.md has the full survey:
+  no locker runs on this session type, so no signal exists
+  to watch). Real-client acceptance still open:
   desktop copy -> iPad paste, iPad copy -> desktop paste,
   and whether the genuine client sends image fields
   (ignored this generation) or stop on disconnect.
