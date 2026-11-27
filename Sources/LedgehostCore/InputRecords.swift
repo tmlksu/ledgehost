@@ -25,6 +25,10 @@ public enum InputRecord {
     /// the helper skips XConvertSelection fetches and record-1 emits
     /// while it is 0.
     public static let opClipboardWatch: UInt8 = 8
+    /// The screen rectangle input fractions map onto (phase 2): the
+    /// injector's watched window, or the root rect while a desktop
+    /// streams. Pushed on injector/source/geometry changes.
+    public static let opSourceRect: UInt8 = 9
     /// Helper -> daemon record op: the CLIPBOARD selection's text
     /// changed under a foreign owner. (stdin ops and stdout records
     /// share the framing, not the op namespace.)
@@ -112,6 +116,15 @@ public enum InputRecord {
     /// op 8: how many sessions subscribe to foreign-clipboard reports.
     public static func clipboardWatch(_ count: Int) -> Data {
         record(op: opClipboardWatch, body: Data([UInt8(min(max(count, 0), 255))]))
+    }
+
+    /// op 9: the pixel rectangle fractions map onto — x/y can be
+    /// negative (a window parked partly off-screen); w/h must be > 0.
+    public static func sourceRect(x: Int, y: Int, width: Int, height: Int) -> Data {
+        var b = Data(capacity: 16)
+        b.appendBE(Int32(x)); b.appendBE(Int32(y))
+        b.appendBE(Int32(width)); b.appendBE(Int32(height))
+        return record(op: opSourceRect, body: b)
     }
 
     /// Helper -> daemon stdout framing as a FramedReader layout

@@ -270,6 +270,7 @@ static void usage(void)
     fputs("usage: ledgehost-media --source x11|test [options]\n"
           "  --x --y --width --height  capture rect (x11) or size (test)\n"
           "  --fps N        default 60\n"
+          "  --xid ID       capture window ID instead of a screen rect\n"
           "  --bitrate BPS  bits per second, default 15000000\n"
           "  --convert cpu|gpu  cpu = videoconvert (primary), gpu = vapostproc\n"
           "  --pattern N    videotestsrc pattern (test source)\n"
@@ -282,6 +283,7 @@ int main(int argc, char **argv)
 {
     const char *source = NULL, *convert = "cpu";
     int x = -1, y = -1, w = 0, h = 0, fps = 60, pattern = 18;
+    unsigned long xid = 0;
     long long bitrate = 15000000;
 
     for (int i = 1; i < argc; i++) {
@@ -295,6 +297,7 @@ int main(int argc, char **argv)
         else if (!strcmp(a, "--fps")) fps = atoi(ARG());
         else if (!strcmp(a, "--bitrate")) bitrate = atoll(ARG());
         else if (!strcmp(a, "--convert")) convert = ARG();
+        else if (!strcmp(a, "--xid")) xid = strtoul(ARG(), NULL, 0);
         else if (!strcmp(a, "--pattern")) pattern = atoi(ARG());
         else if (!strcmp(a, "--frames")) want_frames = atoll(ARG());
         else usage();
@@ -330,7 +333,12 @@ int main(int argc, char **argv)
     char pipe_str[2048];
     if (!strcmp(source, "x11")) {
         char rect[128] = "";
-        if (x >= 0 && y >= 0 && w > 0 && h > 0)
+        if (xid)
+            /* phase 2: capture one window by id, at its own size; the
+             * xid follows the window's position server-side, a resize
+             * is picked up by the daemon's pipeline restart. */
+            snprintf(rect, sizeof rect, " xid=%lu", xid);
+        else if (x >= 0 && y >= 0 && w > 0 && h > 0)
             snprintf(rect, sizeof rect, " startx=%d starty=%d endx=%d endy=%d",
                      x, y, x + w - 1, y + h - 1);
         const char *conv = !strcmp(convert, "gpu")

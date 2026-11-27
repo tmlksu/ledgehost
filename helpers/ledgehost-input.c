@@ -16,6 +16,9 @@
  *   8 clipboard watch  count(1) — sessions subscribed to op-1 reports
  *              (audit S-B); while 0 the helper tracks the owner but
  *              never XConvertSelection-fetches and never emits
+ *   9 source rect    x(4) y(4) w(4) h(4) int32 BE pixels — the screen
+ *              rectangle input fractions map onto (phase 2: the
+ *              injector's watched window; the root rect for desktop)
  * stdout carries the same framing in the helper -> daemon direction:
  *   op 1 clipboard changed  UTF-8 text of a CLIPBOARD selection made
  *              by another X client (never what the helper itself set)
@@ -796,6 +799,18 @@ int main(void)
             case 7: op_clipboard(body + 1, len - 1); break;
             case 8: clip_watch = len > 1 ? body[1] : 0;
                     cdbg("watch: %d subscriber(s)", clip_watch); break;
+            case 9:
+                if (len >= 17) {
+                    int32_t v[4];
+                    for (int i = 0; i < 4; i++)
+                        v[i] = (int32_t)((body[1 + i*4] << 24) | (body[2 + i*4] << 16) |
+                                         (body[3 + i*4] << 8) | body[4 + i*4]);
+                    if (v[2] > 0 && v[3] > 0) {
+                        src_x = v[0]; src_y = v[1]; src_w = v[2]; src_h = v[3];
+                        logf("source rect %dx%d+%d+%d (pushed)", src_w, src_h, src_x, src_y);
+                    }
+                }
+                break;
             default: logf("reject: unknown op %d", op); break;
             }
         }

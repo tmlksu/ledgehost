@@ -11,12 +11,26 @@
  *   xquery activate NAME    raise + input-focus the first toplevel
  *                           whose WM_NAME contains NAME
  *   xquery focus            print the input-focus window's name
+ *   xquery windows          one snapshot of listable windows:
+ *                           "win <xid-hex> <x> <y> <w> <h> <title>" per
+ *                           window (coordinates root-absolute, title
+ *                           _NET_WM_NAME falling back to WM_NAME,
+ *                           controls blanked), then "." — windows are
+ *                           in _NET_CLIENT_LIST order. A window lists
+ *                           only while it is viewable, non-empty and
+ *                           not typed _NET_WM_WINDOW_TYPE_DESKTOP.
+ *   xquery watch            snapshot, then a new snapshot ~100 ms after
+ *                           each burst of client-list/configure/title
+ *                           changes; exits when stdin closes (the
+ *                           daemon holds it open).
  */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #include <ctype.h>
+#include <unistd.h>
+#include <sys/select.h>
 #include <X11/Xlib.h>
 #include <X11/Xatom.h>
 
@@ -145,6 +159,152 @@ static int focus_name(Window root)
 
 static int clip_get(Window win) { return clip_get2(win, a_prop); }
 
+/* MARK: window enumeration (phase 2 — per-window sources)
+ * _NET_CLIENT_LIST is the set of managed clients, in mapping order.
+ * A window lists while it is viewable, non-empty and not the desktop
+ * window itself; docks/panels are real content and stay listed. */
+
+static Atom a_client_list, a_net_name, a_wm_name, a_wtype, a_wtype_desktop;
+
+static void win_atoms(void)
+{
+    a_client_list = XInternAtom(d, "_NET_CLIENT_LIST", False);
+    a_net_name    = XInternAtom(d, "_NET_WM_NAME", False);
+    a_wm_name     = XInternAtom(d, "WM_NAME", False);
+    a_wtype       = XInternAtom(d, "_NET_WM_WINDOW_TYPE", False);
+    a_wtype_desktop = XInternAtom(d, "_NET_WM_WINDOW_TYPE_DESKTOP", False);
+}
+
+static unsigned char *prop(Window w, Atom a, Atom want, unsigned long *n)
+{
+    Atom type; int fmt; unsigned long after; unsigned char *data = NULL;
+    if (XGetWindowProperty(d, w, a, 0, ~0L, False, want,
+                           &type, &fmt, n, &after, &data) != Success || !data)
+        return NULL;
+    return data;
+}
+
+/* The display title: _NET_WM_NAME, else WM_NAME, one line, controls
+ * blanked so a hostile title cannot forge snapshot lines. */
+static void win_title(Window w, char *buf, int n)
+{
+    unsigned long len = 0;
+    unsigned char *p = prop(w, a_net_name, a_utf8, &len);
+    if (p && !len) { XFree(p); p = NULL; }   /* _NET_WM_NAME set, wrong type */
+    if (!p) p = prop(w, a_net_name, AnyPropertyType, &len);
+    if (!p) p = prop(w, a_wm_name, AnyPropertyType, &len);
+    buf[0] = 0;
+    if (p) {
+        int m = (int)(len < (unsigned long)(n - 1) ? len : (unsigned long)(n - 1));
+        memcpy(buf, p, m); buf[m] = 0;
+        XFree(p);
+    }
+    for (int i = 0; buf[i]; i++)
+        if ((unsigned char)buf[i] < 0x20 || buf[i] == 0x7f) buf[i] = ' ';
+}
+
+static int win_is_desktop(Window w)
+{
+    unsigned long n = 0;
+    unsigned char *p = prop(w, a_wtype, XA_ATOM, &n);
+    int desk = 0;
+    if (p) {
+        Atom *t = (Atom *)p;
+        for (unsigned long i = 0; i < n; i++)
+            if (t[i] == a_wtype_desktop) desk = 1;
+        XFree(p);
+    }
+    return desk;
+}
+
+/* Snapshot the listable windows: one "win" line each, "." terminator. */
+static void win_snapshot(Window root)
+{
+    unsigned long n = 0;
+    unsigned char *p = prop(root, a_client_list, XA_WINDOW, &n);
+    if (!p) { puts("."); fflush(stdout); return; }
+    Window *list = (Window *)p;
+    for (unsigned long i = 0; i < n; i++) {
+        Window w = list[i];
+        XWindowAttributes wa;
+        if (!XGetWindowAttributes(d, w, &wa)) continue;
+        if (wa.map_state != IsViewable || wa.width <= 0 || wa.height <= 0)
+            continue;
+        if (wa.override_redirect) continue;
+        if (win_is_desktop(w)) continue;
+        int rx = 0, ry = 0; Window child;
+        if (!XTranslateCoordinates(d, w, root, 0, 0, &rx, &ry, &child))
+            { rx = wa.x; ry = wa.y; }
+        char title[256];
+        win_title(w, title, sizeof title);
+        printf("win %lx %d %d %d %d %s\n", (unsigned long)w,
+               rx, ry, (int)wa.width, (int)wa.height, title);
+    }
+    XFree(p);
+    puts(".");
+    fflush(stdout);
+}
+
+/* StructureNotify+PropertyChange on every client so title, geometry,
+ * map and stack changes wake the watch; refreshed after each snapshot
+ * because the set itself may have moved. */
+static void select_clients(Window root)
+{
+    unsigned long n = 0;
+    unsigned char *p = prop(root, a_client_list, XA_WINDOW, &n);
+    if (!p) return;
+    Window *list = (Window *)p;
+    for (unsigned long i = 0; i < n; i++)
+        XSelectInput(d, list[i], PropertyChangeMask | StructureNotifyMask);
+    XFree(p);
+}
+
+/* Watch the listed windows' state; re-snapshot ~100 ms after each
+ * burst of change (create/destroy/map/configure/title). stdin EOF
+ * exits — the daemon holds the pipe open. */
+static int watch_windows(Window root)
+{
+    win_atoms();
+    XSelectInput(d, root, PropertyChangeMask | SubstructureNotifyMask);
+    select_clients(root);
+    win_snapshot(root);
+    int xfd = ConnectionNumber(d);
+    int dirty = 0;
+    double last_ev = 0;
+    for (;;) {
+        fd_set rfds;
+        FD_ZERO(&rfds); FD_SET(xfd, &rfds); FD_SET(0, &rfds);
+        struct timeval tv = { 0, dirty ? 100 * 1000 : 500 * 1000 };
+        int r = select(xfd + 1, &rfds, NULL, NULL, &tv);
+        if (r > 0 && FD_ISSET(0, &rfds)) {
+            char b[64];
+            if (read(0, b, sizeof b) <= 0) return 0;   /* daemon gone */
+        }
+        while (XPending(d)) {
+            XEvent ev;
+            XNextEvent(d, &ev);
+            switch (ev.type) {
+            case CreateNotify: case DestroyNotify: case MapNotify:
+            case UnmapNotify: case ConfigureNotify: case ReparentNotify:
+            case CirculateNotify:
+                dirty = 1; last_ev = now_sec(); break;
+            case PropertyNotify:
+                if (ev.xproperty.atom == a_client_list ||
+                    ev.xproperty.atom == a_net_name ||
+                    ev.xproperty.atom == a_wm_name)
+                    { dirty = 1; last_ev = now_sec(); }
+                break;
+            default: break;
+            }
+        }
+        if (dirty && now_sec() - last_ev >= 0.1) {
+            select_clients(root);
+            win_snapshot(root);
+            dirty = 0;
+        }
+    }
+}
+
 static int clip_wait(Window win, double secs)
 {
     /* poll until CLIPBOARD has an owner, then fetch like clip get */
@@ -202,6 +362,10 @@ int main(int argc, char **argv)
         { int rc = activate(root, argv[2]); XCloseDisplay(d); return rc; }
     if (argc >= 2 && !strcmp(argv[1], "focus"))
         { int rc = focus_name(root); XCloseDisplay(d); return rc; }
+    if (argc >= 2 && !strcmp(argv[1], "windows"))
+        { win_atoms(); win_snapshot(root); XCloseDisplay(d); return 0; }
+    if (argc >= 2 && !strcmp(argv[1], "watch"))
+        { int rc = watch_windows(root); XCloseDisplay(d); return rc; }
     if (argc >= 3 && !strcmp(argv[1], "clip")) {
         int rc;
         if (!strcmp(argv[2], "get"))
