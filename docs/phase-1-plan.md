@@ -740,3 +740,26 @@ injection is solid and held-state release is proven).
   backward (PTS-order clean, so the corruption is purely
   decode-order); post-fix wire order == PTS order, 0 counter
   regressions. No wire-format change; swift test 37/37.
+- 2026-11-27: S-effort security batch from audit-swe2 + audit-fable
+  (17 items): input-double sanitize+clamp at InputRecord/translator
+  (S1/F1 trap fixed; verified probe 'move 10000 0' no longer crashes
+  the daemon — it logged and survived), op-7 IPC bound shared
+  (helper buf = 4+REC_MAX, REC_MAX = CLIP_MAX+1, mirrored as
+  InputRecord.maxRecordBytes; bad len is FATAL, never clamped — F2/S16;
+  100 KiB device->host clipboard verified exact via probe+xquery;
+  bogus-len stream exits the helper, no ops injected), scroll
+  accumulator capped ~8 clicks/axis (S2/F6), input logging gated to
+  the injector + LogSampler-bounded, stats/refusal logs sampled
+  (S6/F5), TLS-handshake 15 s + Hello 60 s deadlines + 4-slot pairing
+  door cap (S5/F3-lite/F12), conv_pending 2 s deadline (S3), media
+  read off-by-one (S4/F7), pairing RNG fail-closed (S10/F10),
+  clipboard relay re-encoded (S8/S-C), echo token single-use (S9/S-D),
+  pins.reload failure log-once (S12), dir fsync after rename (S13),
+  pairing code-only journal + 10 min rotation (S11/F4), installer
+  arg validation (S15), input-helper write_all (S17), pipeline
+  restart debounce 3 s (S7), unit hardening (S14/S-G — verified via
+  scratch unit ledgehost-sec: ProtectKernelTunables/ControlGroups/
+  RestrictRealtime/ProtectHostname active; CapabilityBoundingSet,
+  ProtectKernelModules, ProtectClock all fail 218/CAPABILITIES under
+  the user manager and are documented as not-set instead).
+  swift test 40/40; loopback-e2e + real-app-roundtrip all pass.

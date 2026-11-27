@@ -25,8 +25,26 @@ LockPersonality=yes
 # this host the unit will not start — remove these two lines.
 ProtectSystem=strict
 ReadWritePaths=%h/.config/ledgehost
+# No-cost hardening (audit S14/S-G): verified by starting a scratch unit
+# under this user manager.
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictRealtime=yes
+# ProtectHostname is silently ignored where UTS namespaces are
+# prohibited ("ignoring namespace setup" in the journal) and applied
+# where they are allowed — kept for the latter.
+ProtectHostname=yes
 
-# Deliberately NOT set (each breaks a real need):
+# Deliberately NOT set (each verified to break THIS user manager's
+# start-up — capability changes need CAP_SETPCAP the manager lacks:
+# status 218/CAPABILITIES):
+#   CapabilityBoundingSet=      bounding needs caps the manager lacks
+#   ProtectKernelModules=yes    drops CAP_SYS_MODULE — same failure
+#   ProtectClock=yes            drops CAP_SYS_TIME — same failure
+# Each also needs a real capability the daemon can lose safely; revisit
+# only if the unit ever runs as a system service.
+#
+# Still not set (each breaks a real need):
 #   PrivateTmp/ProtectHome  X socket and config live under /tmp or $HOME
 #   PrivateDevices          GStreamer/VA-API need /dev/dri
 #   MemoryDenyWriteExecute  encoder/driver JIT codegen

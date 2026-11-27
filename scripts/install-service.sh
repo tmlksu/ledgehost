@@ -38,6 +38,46 @@ while [ $# -gt 0 ]; do
     esac
 done
 
+# --- argument validation (audit S15) ----------------------------------
+# Every flag value lands verbatim in a systemd unit or drop-in; a newline
+# or unit-injection shape in one would smuggle extra directives into the
+# service. Reject them before anything is written.
+
+die() { echo "install-service: $1" >&2; exit 64; }
+
+reject_newlines() {   # $1 = flag name, $2 = value
+    case "$2" in
+        *$'\n'*|*$'\r'*) die "$1: newlines are not allowed (unit injection)" ;;
+    esac
+}
+
+reject_newlines --display "$display"
+reject_newlines --prefix "$prefix"
+reject_newlines --unit-name "$unit"
+reject_newlines --port "$port"
+case "$unit" in
+    *[!A-Za-z0-9_.@-]*) die "--unit-name: bad unit name '$unit'" ;;
+esac
+case "$port" in
+    ''|*[!0-9]*) die "--port: not a number: '$port'" ;;
+    *) [ "$port" -ge 1 ] && [ "$port" -le 65535 ] || die "--port: out of range: $port" ;;
+esac
+case "$display" in
+    :*|/*) ;;   # :N or an X socket path
+    *) die "--display: expected :N or a socket path, got '$display'" ;;
+esac
+for e in ${extra_env[@]+"${extra_env[@]}"}; do
+    reject_newlines --env "$e"
+    [[ "$e" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]] || die "--env: expected KEY=VALUE, got '$e'"
+done
+for p in ${read_write[@]+"${read_write[@]}"}; do
+    reject_newlines --read-write "$p"
+    case "$p" in
+        /*) ;;
+        *) die "--read-write: expected an absolute path, got '$p'" ;;
+    esac
+done
+
 # --- build (repo conventions: toolchain on PATH; the Makefile carries
 # --- its own devprefix include/library wiring) -----------------------
 

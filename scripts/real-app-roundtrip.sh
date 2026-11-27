@@ -31,8 +31,14 @@ mkdir -p "$SCRATCH" "$PROBECFG" /tmp/lh-rt-rec
 XDG_CONFIG_HOME="$SCRATCH" DISPLAY=$DISP ./.build/debug/ledgehostd $PORT \
     > /tmp/lh-rt-daemon.log 2>&1 &
 DPID=$!
-sleep 9
-code="$(sed -n 's/.*pairing: code //p' /tmp/lh-rt-daemon.log | tail -1 | tr -d ' ')"
+# The first pairing-code derivation is a 600k-round PBKDF2 (~10 s in a
+# debug build under load); poll rather than sleep a fixed span.
+code=""
+for _ in $(seq 1 40); do
+    code="$(sed -n 's/.*pairing: code //p' /tmp/lh-rt-daemon.log | tail -1 | tr -d ' ')"
+    [ -n "$code" ] && break
+    sleep 1
+done
 [ -n "$code" ] || { echo "no pairing code"; kill $DPID; exit 1; }
 XDG_CONFIG_HOME=$PROBECFG ./.build/debug/ledgehost-probe pair \
     --host 127.0.0.1 --port $PORT --code "$code" > /dev/null 2>&1 \
