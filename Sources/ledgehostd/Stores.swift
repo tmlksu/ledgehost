@@ -19,6 +19,27 @@ enum Log {
     static func stamp() -> String { formatter.string(from: Date()) }
 }
 
+/// Bounded per-message logging (audit S6/F5): at most `budget` lines
+/// per `seconds` window; held lines are counted so the next emitted
+/// line can report "(+N held)" — floods stay visible in aggregate
+/// without filling the journal.
+struct LogSampler {
+    private var windowStart = 0.0
+    private var used = 0
+    private var held = 0
+
+    /// Returns the number of lines held since the last emission when
+    /// this line may print, or nil when it should be held.
+    mutating func emit(every seconds: Double = 1, budget: Int = 8) -> Int? {
+        let now = Date().timeIntervalSince1970
+        if now - windowStart >= seconds { windowStart = now; used = 0 }
+        if used >= budget { held += 1; return nil }
+        used += 1
+        defer { held = 0 }
+        return held
+    }
+}
+
 enum StoreError: Error {
     case corrupt(String)
     case io(String)
@@ -53,6 +74,14 @@ func atomicWrite(_ data: Data, to url: URL) throws {
     if rename(tmp.path, url.path) != 0 {
         throw StoreError.io("rename to \(url.path) failed")
     }
+    // The file is durable; make the directory entry durable too
+    // (audit S13) — without this a crash can still lose the rename.
+    #if canImport(Glibc)
+    if let dfd = FileHandle(forReadingAtPath: url.deletingLastPathComponent().path) {
+        _ = try? dfd.synchronize()
+        try? dfd.close()
+    }
+    #endif
     try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
 }
 
@@ -176,12 +205,32 @@ final class PinStore {
 
     /// Re-read paired.json if it changed on disk (the unpair path writes
     /// it from another process) — the live-revocation watch in main.
+    /// A read/parse failure keeps the last pin set (the fail-open-for-
+    /// availability tradeoff) but is logged once per episode (audit S12)
+    /// so a missed revocation window is diagnosable.
     func reload() {
         lock.lock(); defer { lock.unlock() }
-        guard let data = try? readIfExists(url),
-              let decoded = try? JSONDecoder().decode(PinFile.self, from: data),
-              decoded.version == 1 else { return }
+        var data: Data?
+        do { data = try readIfExists(url) } catch { noteReloadFailure("unreadable"); return }
+        guard let data else { clearReloadFailure(); return }
+        guard let decoded = try? JSONDecoder().decode(PinFile.self, from: data),
+              decoded.version == 1 else { noteReloadFailure("unparseable"); return }
         file = decoded
+        clearReloadFailure()
+    }
+
+    private var reloadFailing = false
+    private func noteReloadFailure(_ what: String) {
+        if !reloadFailing {
+            reloadFailing = true
+            print(Log.stamp(), "ledgehostd: paired.json reload failed (\(what)) — keeping the last pin set")
+        }
+    }
+    private func clearReloadFailure() {
+        if reloadFailing {
+            reloadFailing = false
+            print(Log.stamp(), "ledgehostd: paired.json reads cleanly again")
+        }
     }
 }
 

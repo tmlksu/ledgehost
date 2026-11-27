@@ -92,6 +92,13 @@ var settings = StreamSettings(maxFPS: 60, bitrate: 15_000_000, captureScale: 1,
 final class SessionRegistry {
     var sessions: [ObjectIdentifier: ConnectionHandler] = [:]
 
+    /// Open sill-pair/1 connections (audit S5/F3-lite): the pairing door
+    /// is unauthenticated, so its concurrency is capped — extra
+    /// connections are refused at handshake time. Sessions that leave
+    /// the pairing state or die decrement this.
+    var pairingDoors = 0
+    static let maxPairingDoors = 4
+
     var watchers: [ConnectionHandler] { sessions.values.filter { $0.watchingDesktop } }
 
     var maxWantedFPS: Int {
@@ -115,8 +122,12 @@ let input = InputService(group: group,
 // A foreign client's CLIPBOARD text → every subscribed connection,
 // unless it is the text a device itself just set (echo suppression).
 input.onClipboard = { text in
-    if text == deviceSetText {
-        deviceSetText = nil
+    // deviceSetText is a single-use echo token (audit S9/S-D): consumed
+    // on the first helper report, matching or not, so a device-set text
+    // cannot indefinitely suppress a foreign copy of the same content.
+    let isEcho = text == deviceSetText
+    deviceSetText = nil
+    if isEcho {
         print(Log.stamp(), "ledgehostd: clipboard: \(text.utf8.count) byte(s) match the device's own set — not broadcast")
         return
     }
@@ -223,8 +234,16 @@ final class ConnectionHandler: ChannelInboundHandler {
     private var state: State = .awaitingGate
     private var buffer = Data()
     private var tick: RepeatedTask?
+    /// Deadline for whichever pre-session wait is current: TLS handshake,
+    /// pair request, or first Hello (audit S5/F3-lite/F12). Reused so a
+    /// connection can never hold more than one pending deadline.
     private var deadline: Scheduled<()>?
     private weak var channel: Channel?
+    /// This connection holds a pairing-door slot (audit S5 cap).
+    private var holdsPairingDoor = false
+    /// Bounded per-message logging (audit S6/F5).
+    private var inputLog = LogSampler()
+    private var msgLog = LogSampler()
     var label = "?"
     var watchingDesktop = false
     var watcher = MediaService.Watcher()
@@ -265,11 +284,20 @@ final class ConnectionHandler: ChannelInboundHandler {
 
     func userInboundEventTriggered(context: ChannelHandlerContext, event: Any) {
         if let tlsEvent = event as? TLSUserEvent, case .handshakeCompleted(let negotiated) = tlsEvent {
+            deadline?.cancel()          // TLS handshake deadline served
             guard let fp = peer.fingerprint else {
                 context.close(promise: nil); return
             }
             switch negotiated {
             case "sill-pair/1":
+                // Cap concurrent unauthenticated doors (audit S5/F3-lite):
+                // a connect flood may not hold unbounded handshake slots.
+                guard registry.pairingDoors < SessionRegistry.maxPairingDoors else {
+                    print(Log.stamp(), "ledgehostd: pairing door busy (\(registry.pairingDoors) open) — refusing extra connection")
+                    context.close(promise: nil); return
+                }
+                registry.pairingDoors += 1
+                holdsPairingDoor = true
                 state = .pairing
                 // 30 s, not the protocol's nominal 10: a debug-build
                 // client spends ~11 s deriving the 600k-round pairing
@@ -285,6 +313,13 @@ final class ConnectionHandler: ChannelInboundHandler {
                 if pins.isPinned(fp) {
                     state = .awaitingHello
                     print(Log.stamp(), "ledgehostd: session from paired \(RemoteIdentityShortName(fp))")
+                    // A pinned client that never says Hello holds a
+                    // slot forever otherwise (audit S5/F12).
+                    deadline = context.eventLoop.scheduleTask(in: .seconds(60)) { [weak self] in
+                        guard let self, self.state == .awaitingHello else { return }
+                        print(Log.stamp(), "ledgehostd: no Hello within 60 s — closing")
+                        context.close(promise: nil)
+                    }
                 } else {
                     print(Log.stamp(), "ledgehostd: session from unpaired \(RemoteIdentityShortName(fp)) — closing")
                     context.close(promise: nil)
@@ -343,6 +378,7 @@ final class ConnectionHandler: ChannelInboundHandler {
         switch state {
         case .pairing:
             deadline?.cancel()
+            if holdsPairingDoor { registry.pairingDoors -= 1; holdsPairingDoor = false }
             state = .done
             guard kind == .pairRequest, let request = Wire.decode(PairRequest.self, from: payload),
                   let fp = peer.fingerprint else {
@@ -353,6 +389,7 @@ final class ConnectionHandler: ChannelInboundHandler {
             context.close(promise: nil)
 
         case .awaitingHello:
+            deadline?.cancel()          // Hello arrived (or the payload proves it won't)
             guard kind == .hello, let hello = Wire.decode(Hello.self, from: payload) else {
                 print(Log.stamp(), "ledgehostd: session's first message was not a Hello — closing")
                 context.close(promise: nil); state = .done; return
@@ -386,8 +423,10 @@ final class ConnectionHandler: ChannelInboundHandler {
                     media.requestKeyframe()
                 }
             case .clientStats:
-                if let stats = Wire.decode(ClientStats.self, from: payload) {
-                    print(Log.stamp(), "ledgehostd: stats \(label): fps \(stats.fps) frameAge \(stats.frameAgeMs) ms rtt \(stats.rttMs) ms")
+                if let stats = Wire.decode(ClientStats.self, from: payload),
+                   let held = msgLog.emit() {
+                    let more = held > 0 ? " (+\(held) held)" : ""
+                    print(Log.stamp(), "ledgehostd: stats \(label): fps \(stats.fps) frameAge \(stats.frameAgeMs) ms rtt \(stats.rttMs) ms\(more)")
                 }
             case .input:
                 handleInput(payload: payload)
@@ -396,9 +435,13 @@ final class ConnectionHandler: ChannelInboundHandler {
             case .changeSettings:
                 handleChangeSettings(context: context, payload: payload)
             case .pairingWanted:
-                print(Log.stamp(), "ledgehostd: pairingWanted on a session — ignored")
+                if msgLog.emit() != nil {
+                    print(Log.stamp(), "ledgehostd: pairingWanted on a session — ignored")
+                }
             default:
-                print(Log.stamp(), "ledgehostd: session message kind \(kind.rawValue) (\(payload.count) bytes)")
+                if msgLog.emit() != nil {
+                    print(Log.stamp(), "ledgehostd: session message kind \(kind.rawValue) (\(payload.count) bytes)")
+                }
             }
 
         case .awaitingGate, .done:
@@ -463,26 +506,33 @@ final class ConnectionHandler: ChannelInboundHandler {
     }
 
     /// kind 8 → op records for the input helper. Only the injector
-    /// session (most recent .desktop selector) may inject; events are
-    /// rate-capped at 240/s and validated by the translator before
-    /// they reach XTest (the helper re-validates, defence in depth).
-    /// Logging shows the SHAPE only — event kind, HID usage, modifier
-    /// bits — never text payloads or key identities beyond usages.
+    /// session (most recent .desktop selector) may inject — the gate
+    /// runs BEFORE any logging (audit S6/F5: per-event logging before
+    /// arbitration is a journal-flood surface); events are rate-capped
+    /// at 240/s and validated by the translator before they reach
+    /// XTest. Logging shows the SHAPE only — event kind, HID usage,
+    /// modifier bits — never text payloads, and is bounded by
+    /// LogSampler. Double fields are formatted via the trap-safe
+    /// ViewportBounds.number — an Int() conversion here was the S1/F1
+    /// daemon-crash primitive.
     private func handleInput(payload: Data) {
         guard let ev = Wire.decode(InputEvent.self, from: payload) else { return }
-        switch ev {
-        case .pointer(let a, let x, let y):
-            print(Log.stamp(), "ledgehostd: input \(label): pointer \(a.rawValue) x\(Int(x*1000))y\(Int(y*1000))")
-        case .scroll(_, _, let dx, let dy):
-            print(Log.stamp(), "ledgehostd: input \(label): scroll dx\(Int(dx*1000)) dy\(Int(dy*1000))")
-        case .text(let s):
-            print(Log.stamp(), "ledgehostd: input \(label): text (n=\(s.utf8.count))")
-        case .key(let u, let d, let m):
-            print(Log.stamp(), "ledgehostd: input \(label): key hid=0x\(String(u, radix: 16)) down=\(d) mods=0x\(String(m, radix: 16))")
-        case .scrollGesture(let phase, _, _):
-            print(Log.stamp(), "ledgehostd: input \(label): scrollGesture \(phase.rawValue)")
-        }
         guard registry.injector === self else { return }
+        if let held = inputLog.emit() {
+            let more = held > 0 ? " (+\(held) held)" : ""
+            switch ev {
+            case .pointer(let a, let x, let y):
+                print(Log.stamp(), "ledgehostd: input \(label): pointer \(a.rawValue) x\(ViewportBounds.number(x))y\(ViewportBounds.number(y))\(more)")
+            case .scroll(_, _, let dx, let dy):
+                print(Log.stamp(), "ledgehostd: input \(label): scroll dx\(ViewportBounds.number(dx)) dy\(ViewportBounds.number(dy))\(more)")
+            case .text(let s):
+                print(Log.stamp(), "ledgehostd: input \(label): text (n=\(s.utf8.count))\(more)")
+            case .key(let u, let d, let m):
+                print(Log.stamp(), "ledgehostd: input \(label): key hid=0x\(String(u, radix: 16)) down=\(d) mods=0x\(String(m, radix: 16))\(more)")
+            case .scrollGesture(let phase, _, _):
+                print(Log.stamp(), "ledgehostd: input \(label): scrollGesture \(phase.rawValue)\(more)")
+            }
+        }
         guard watcher.rateLimiter.allow(now: Date().timeIntervalSince1970) else { return }
         if let records = watcher.translator.translate(ev) {
             input.send(records)
@@ -511,8 +561,13 @@ final class ConnectionHandler: ChannelInboundHandler {
             print(Log.stamp(), "ledgehostd: \(label) set the clipboard (\(text.utf8.count) bytes)")
             deviceSetText = text          // echo suppression, defence in depth
             input.setClipboard(text)
-            for other in registry.sessions.values where other !== self && other.clipboardSubscribed {
-                other.send(kind: .clipboard, payload: payload)
+            // Relay a re-encoded text-only payload (audit S8/S-C), never
+            // the received bytes verbatim — a crafted message could
+            // otherwise smuggle extra fields to other subscribers.
+            if let relay = ClipboardPolicy.payload(text: text) {
+                for other in registry.sessions.values where other !== self && other.clipboardSubscribed {
+                    other.send(kind: .clipboard, payload: relay)
+                }
             }
         case .stop:
             if clipboardSubscribed {
@@ -520,7 +575,9 @@ final class ConnectionHandler: ChannelInboundHandler {
                 print(Log.stamp(), "ledgehostd: \(label) unsubscribed from the clipboard")
             }
         case .refuse(let why):
-            print(Log.stamp(), "ledgehostd: \(label) clipboard refused (\(why))")
+            if msgLog.emit() != nil {
+                print(Log.stamp(), "ledgehostd: \(label) clipboard refused (\(why))")
+            }
         }
     }
 
@@ -530,7 +587,9 @@ final class ConnectionHandler: ChannelInboundHandler {
             return
         }
         if let why = ViewportBounds.refusal(v) {
-            print(Log.stamp(), "ledgehostd: viewport from \(label) refused: \(why)")
+            if msgLog.emit() != nil {
+                print(Log.stamp(), "ledgehostd: viewport from \(label) refused: \(why)")
+            }
             return
         }
         let wanted = min(max(v.fps ?? 60, 24), settings.maxFPS)
@@ -633,6 +692,13 @@ final class ConnectionHandler: ChannelInboundHandler {
     func channelActive(context: ChannelHandlerContext) {
         channel = context.channel
         label = peer.fingerprint.map { RemoteIdentityShortName($0) } ?? context.channel.remoteAddress.map { "\($0)" } ?? "?"
+        // Bound the TLS handshake (audit S5/F3-lite): crypto runs on this
+        // same event loop, so an unfinished handshake cannot idle here.
+        deadline = context.eventLoop.scheduleTask(in: .seconds(15)) { [weak self] in
+            guard let self, self.state == .awaitingGate else { return }
+            print(Log.stamp(), "ledgehostd: TLS handshake deadline — closing")
+            context.close(promise: nil)
+        }
         context.fireChannelActive()
     }
 
@@ -644,6 +710,7 @@ final class ConnectionHandler: ChannelInboundHandler {
     func channelInactive(context: ChannelHandlerContext) {
         tick?.cancel()
         deadline?.cancel()
+        if holdsPairingDoor { registry.pairingDoors -= 1; holdsPairingDoor = false }
         if watchingDesktop {
             watchingDesktop = false
             if registry.injector === self {
@@ -672,6 +739,13 @@ defer {
     media.shutdown()
     input.shutdown()
     try? group.syncShutdownGracefully()
+}
+
+// Pairing credential expiry (audit S11/F4): while unpaired a printed
+// code stays valid indefinitely, so code + QR secret rotate on a timer
+// independent of pairing attempts — a code's lifetime is ≤ 10 min.
+eventLoop.scheduleRepeatedTask(initialDelay: .seconds(600), delay: .seconds(600)) { _ in
+    pairing.rotate()
 }
 
 // Live revocation: re-read the pin store every 2 s; a fingerprint that

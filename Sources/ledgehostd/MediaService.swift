@@ -52,6 +52,13 @@ final class MediaService {
     private var restarts = 0
     private var lastRestart: Date = .distantPast
     private var lastForcedIDR: Date = .distantPast
+    /// Global pipeline-restart debounce (audit S7): viewport and
+    /// changeSettings storms could otherwise churn the encoder
+    /// continuously — at most one restart per window, latest wins.
+    /// (Distinct from lastRestart, which backs crash-loop backoff.)
+    private var pendingRestart: Scheduled<Void>?
+    private var lastRequestedRestart: Date = .distantPast
+    private static let restartDebounce: TimeInterval = 3
 
     /// Current parameter sets as the wire carries them (kind 0 payload).
     private(set) var setsPayload: Data?
@@ -76,14 +83,33 @@ final class MediaService {
 
     /// A settings change that cannot retune live (today: fps) restarts
     /// the pipeline; watchers rejoin through the standard kind 0 + IDR
-    /// path. Called only on the event loop.
+    /// path. Called only on the event loop. Debounced globally
+    /// (audit S7): at most one restart per `restartDebounce` window —
+    /// a later request inside the window schedules one restart at the
+    /// window's edge (latest wins), never a restart storm.
     func restart() {
         loop.execute {
             guard self.running else { return }
-            print(Log.stamp(), "ledgehostd: media: restarting pipeline (fps now \(self.fpsSource()))")
-            self.stop(restart: true)
-            self.loop.scheduleTask(in: .milliseconds(300)) { [weak self] in self?.start() }
+            let wait = Self.restartDebounce - Date().timeIntervalSince(self.lastRequestedRestart)
+            if wait > 0 {
+                guard self.pendingRestart == nil else { return }   // latest already queued
+                print(Log.stamp(), "ledgehostd: media: restart debounced \(Int(wait * 1000)) ms")
+                self.pendingRestart = self.loop.scheduleTask(in: .milliseconds(Int64(wait * 1000))) { [weak self] in
+                    self?.doRestart()
+                }
+                return
+            }
+            self.doRestart()
         }
+    }
+
+    private func doRestart() {
+        pendingRestart = nil
+        lastRequestedRestart = Date()
+        guard running else { return }
+        print(Log.stamp(), "ledgehostd: media: restarting pipeline (fps now \(fpsSource()))")
+        stop(restart: true)
+        loop.scheduleTask(in: .milliseconds(300)) { [weak self] in self?.start() }
     }
 
     // MARK: - Lifecycle

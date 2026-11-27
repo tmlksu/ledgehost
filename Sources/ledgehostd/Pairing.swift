@@ -34,16 +34,27 @@ final class PairingManager {
     }
 
     private func rotateLocked() {
-        code = PairingCode.generate() ?? "000000000000"
-        codeKey = PairingProof.codeKey(code: code, macFingerprint: identity.fingerprint)
+        // Fail closed (audit S10/F10): a failed RNG must never leave a
+        // known code or a zero QR secret in force — with codeKey nil
+        // every proof answer is `closed`.
+        guard let newCode = PairingCode.generate() else {
+            code = ""; codeKey = nil; qrSecret = Data(); triesLeft = 0
+            print(Log.stamp(), "pairing: code generation failed — pairing door closed until the next rotation")
+            return
+        }
         var secret = [UInt8](repeating: 0, count: 16)
-        _ = SillRandom.fill(&secret)
+        guard SillRandom.fill(&secret) else {
+            code = ""; codeKey = nil; qrSecret = Data(); triesLeft = 0
+            print(Log.stamp(), "pairing: RNG failed — pairing door closed until the next rotation")
+            return
+        }
+        code = newCode
+        codeKey = PairingProof.codeKey(code: code, macFingerprint: identity.fingerprint)
         qrSecret = Data(secret)
         triesLeft = Self.maxTries
+        // Code only, never the link (audit S11/F4): the QR secret is a
+        // live credential and must not land in the persistent journal.
         print(Log.stamp(), "pairing: code \(PairingCode.grouped(code))")
-        let link = PairLink(fingerprint: identity.fingerprint, secret: qrSecret,
-                            name: identity.name, port: port, addresses: [])
-        print(Log.stamp(), "pairing: link \(link.url)")
     }
 
     /// Answers one kind 19. `deviceFingerprint` comes from the TLS session.
