@@ -12,7 +12,7 @@ final class InputTests: XCTestCase {
     }
 
     func testRecordFraming() {
-        let r = InputRecord.pointer(kind: InputRecord.pointerMove, x: 0.5, y: 1.0)
+        let r = InputRecord.pointer(kind: InputRecord.pointerMove, x: 0.5, y: 1.0)!
         let (op, body) = parse(r)!
         XCTAssertEqual(op, InputRecord.opPointer)
         XCTAssertEqual(body.count, 9)
@@ -143,6 +143,61 @@ final class InputTests: XCTestCase {
         XCTAssertEqual(String(decoding: bodyOut, as: UTF8.self), "clip-text-42")
     }
 
+    // MARK: - hostile input doubles (audit S1/F1, S2/F6)
+
+    /// A paired client controls every Double in an InputEvent. The
+    /// translator must never trap and must clamp before any Int32
+    /// conversion — one move with x=2148.5 or 1e308 used to SIGILL the
+    /// daemon via `Int32(Double)`.
+    func testHostilePointerDoubles() {
+        var t = InputTranslator()
+        // Non-finite values are dropped, never clamped to a weird spot.
+        XCTAssertNil(t.translate(.pointer(.move, x: .infinity, y: 0.5)))
+        XCTAssertNil(t.translate(.pointer(.move, x: 0.5, y: -.infinity)))
+        XCTAssertNil(t.translate(.pointer(.move, x: .nan, y: 0.5)))
+        // Finite but huge: clamped inside the record bounds, not trapped.
+        for x in [2148.5, 1e308, -1e308, 1e6, -1e6] {
+            let out = t.translate(.pointer(.move, x: x, y: x))
+            XCTAssertEqual(out?.count, 1, "x=\(x) should clamp, not drop or trap")
+            let (op, body) = parse(out![0])!
+            XCTAssertEqual(op, InputRecord.opPointer)
+            XCTAssertLessThanOrEqual(abs(body.readBE(Int32.self, at: 1)), 2_000_000)
+            XCTAssertLessThanOrEqual(abs(body.readBE(Int32.self, at: 5)), 2_000_000)
+        }
+        // Record layer directly: same behaviour without the translator.
+        XCTAssertNil(InputRecord.pointer(kind: InputRecord.pointerMove, x: .nan, y: 0))
+        XCTAssertNotNil(InputRecord.pointer(kind: InputRecord.pointerMove, x: 1e308, y: -1e308))
+    }
+
+    /// Huge scroll deltas clamp to ±4 frame fractions (±4e6
+    /// milli-fractions) — the daemon-side bound behind helper cap S2/F6.
+    func testHostileScrollDeltas() {
+        var t = InputTranslator()
+        XCTAssertNil(t.translate(.scroll(x: 0, y: 0, dx: .infinity, dy: 0)))
+        XCTAssertNil(t.translate(.scroll(x: 0, y: 0, dx: 0, dy: .nan)))
+        for dx in [3000.0, -1e308, 2148.5, 100.0] {
+            let out = t.translate(.scroll(x: 0.5, y: 0.5, dx: dx, dy: dx))
+            XCTAssertEqual(out?.count, 1)
+            let (_, body) = parse(out![0])!
+            XCTAssertLessThanOrEqual(abs(body.readBE(Int32.self, at: 0)), 4_000_000)
+            XCTAssertLessThanOrEqual(abs(body.readBE(Int32.self, at: 4)), 4_000_000)
+        }
+        // And a sane delta still passes through exactly.
+        let out = t.translate(.scroll(x: 0.5, y: 0.5, dx: 0.1, dy: -0.05))!
+        let (_, body) = parse(out[0])!
+        XCTAssertEqual(body.readBE(Int32.self, at: 0), 100_000)
+        XCTAssertEqual(body.readBE(Int32.self, at: 4), -50_000)
+    }
+
+    /// A maximal clipboard op-7 record fits the agreed IPC bound
+    /// (audit F2/S16): REC_MAX in the helper is CLIP_MAX+1 == 256KiB+1.
+    func testClipboardRecordWithinIPCMax() {
+        let text = String(repeating: "x", count: 256 * 1024)
+        let rec = InputRecord.clipboard(text)
+        XCTAssertEqual(rec.count, 4 + InputRecord.maxRecordBytes)
+        XCTAssertEqual(InputRecord.maxRecordBytes, 256 * 1024 + 1)
+    }
+
     func testOutputRecordValidation() {
         XCTAssertEqual(InputRecord.outputRecordLength(Data([0, 1])), nil)   // short header
         XCTAssertEqual(InputRecord.outputRecordLength(Data([0, 0, 0, 0])), -1) // len 0
@@ -151,7 +206,7 @@ final class InputTests: XCTestCase {
         // byte 4; the CHANNEL discriminates (a pointer op record read
         // on the output channel would parse as kind 1 — the daemon
         // only applies this parse to helper stdout)
-        let (kind2, _) = InputRecord.parseOutput(InputRecord.pointer(kind: InputRecord.pointerMove, x: 0.5, y: 0.5))!
+        let (kind2, _) = InputRecord.parseOutput(InputRecord.pointer(kind: InputRecord.pointerMove, x: 0.5, y: 0.5)!)!
         XCTAssertEqual(kind2, InputRecord.opPointer)
         // invalid UTF-8 body still parses structurally; the daemon
         // re-validates UTF-8 before any broadcast

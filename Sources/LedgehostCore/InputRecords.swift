@@ -27,6 +27,11 @@ public enum InputRecord {
     public static let pointerRightDown: UInt8 = 3
     public static let pointerRightUp: UInt8 = 4
 
+    /// Largest record the helper's stdin buffer can hold: one op byte
+    /// plus a maximal clipboard payload. Mirrors REC_MAX in
+    /// helpers/ledgehost-input.c — keep the two in sync (audit F2/S16).
+    public static let maxRecordBytes = 256 * 1024 + 1
+
     public static func record(op: UInt8, body: Data = Data()) -> Data {
         var d = Data(capacity: 5 + body.count)
         d.appendBE(UInt32(body.count + 1))
@@ -35,18 +40,44 @@ public enum InputRecord {
         return d
     }
 
-    public static func pointer(kind: UInt8, x: Double, y: Double) -> Data {
+    /// Fraction -> Int32 milli-fraction. The wire values are
+    /// unconstrained JSON Doubles and `Int32(Double)` TRAPS on
+    /// overflow/non-finite input (audit S1/F1): callers clamp first,
+    /// this conversion bounds against Int32.min/.max so it cannot trap
+    /// even if a future caller forgets.
+    private static func milli(_ v: Double) -> Int32 {
+        guard v.isFinite else { return 0 }
+        let m = (v * 1e6).rounded()       // may still be infinite for huge v
+        if m <= Double(Int32.min) { return Int32.min }
+        if m >= Double(Int32.max) { return Int32.max }
+        return Int32(m)                   // in-range: cannot trap
+    }
+
+    /// Clamp bounds: pointer fractions are [0,1] by definition (the
+    /// helper clamps to the source rect anyway); scroll deltas are frame
+    /// fractions — a full-screen scroll per event is already absurd, so
+    /// ±4 is generous (audit S2/F6; the helper also caps clicks/record).
+    private static let pointerBound = 2.0
+    private static let scrollBound = 4.0
+
+    /// A pointer record, or nil when x/y is non-finite — the event is
+    /// dropped rather than clamped to something arbitrary.
+    public static func pointer(kind: UInt8, x: Double, y: Double) -> Data? {
+        guard x.isFinite, y.isFinite else { return nil }
         var b = Data()
         b.append(kind)
-        b.appendBE(Int32((x * 1e6).rounded()))
-        b.appendBE(Int32((y * 1e6).rounded()))
+        b.appendBE(milli(min(max(x, -pointerBound), pointerBound)))
+        b.appendBE(milli(min(max(y, -pointerBound), pointerBound)))
         return record(op: opPointer, body: b)
     }
 
-    public static func scroll(dx: Double, dy: Double) -> Data {
+    /// A scroll record, or nil on non-finite deltas. Deltas are clamped
+    /// to ±scrollBound frame fractions before conversion.
+    public static func scroll(dx: Double, dy: Double) -> Data? {
+        guard dx.isFinite, dy.isFinite else { return nil }
         var b = Data()
-        b.appendBE(Int32((dx * 1e6).rounded()))
-        b.appendBE(Int32((dy * 1e6).rounded()))
+        b.appendBE(milli(min(max(dx, -scrollBound), scrollBound)))
+        b.appendBE(milli(min(max(dy, -scrollBound), scrollBound)))
         return record(op: opScroll, body: b)
     }
 
@@ -74,7 +105,7 @@ public enum InputRecord {
     public static func outputRecordLength(_ d: Data) -> Int? {
         guard d.count >= 4 else { return nil }
         let len = Int(d.readBE(UInt32.self, at: 0))
-        guard len >= 1, len <= 256 * 1024 + 1 else { return -1 }
+        guard len >= 1, len <= maxRecordBytes else { return -1 }
         return 4 + len
     }
 
@@ -170,9 +201,9 @@ public struct InputTranslator {
             case .rightDown: kind = InputRecord.pointerRightDown
             case .rightUp: kind = InputRecord.pointerRightUp
             }
-            return [InputRecord.pointer(kind: kind, x: x, y: y)]
+            return InputRecord.pointer(kind: kind, x: x, y: y).map { [$0] }
         case .scroll(_, _, let dx, let dy):
-            return [InputRecord.scroll(dx: dx, dy: dy)]
+            return InputRecord.scroll(dx: dx, dy: dy).map { [$0] }
         case .text(let s):
             let out = text(s)
             return out.isEmpty ? nil : out
