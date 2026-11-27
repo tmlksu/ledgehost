@@ -197,7 +197,7 @@ static gboolean on_stdin(gint fd, GIOCondition cond, gpointer data)
         return G_SOURCE_REMOVE;
     }
     char buf[256];
-    ssize_t n = read(fd, buf, sizeof buf);
+    ssize_t n = read(fd, buf, sizeof buf - 1);
     if (n <= 0) {
         g_main_loop_quit(loop);         /* stdin EOF */
         return G_SOURCE_REMOVE;

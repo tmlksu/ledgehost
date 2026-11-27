@@ -291,8 +291,16 @@ static void op_scroll(const unsigned char *p, int n)
     scroll_acc_x += (int32_t)((p[0] << 24) | (p[1] << 16) | (p[2] << 8) | p[3]);
     scroll_acc_y += (int32_t)((p[4] << 24) | (p[5] << 16) | (p[6] << 8) | p[7]);
     /* one click per 1/24 of the frame height (~one wheel notch); the
-     * leftover fraction is kept so sub-click deltas are not lost */
+     * leftover fraction is kept so sub-click deltas are not lost. The
+     * accumulators are bounded (audit S2/F6): one hostile record must
+     * never enqueue tens of thousands of XTest events — the remainder is
+     * carried, but only up to a few clicks per record. */
     long per = 1000000 / 24;
+    long cap = 8 * per;             /* at most ~8 wheel clicks queued per axis */
+    if (scroll_acc_x > cap)  scroll_acc_x = cap;
+    if (scroll_acc_x < -cap) scroll_acc_x = -cap;
+    if (scroll_acc_y > cap)  scroll_acc_y = cap;
+    if (scroll_acc_y < -cap) scroll_acc_y = -cap;
     while (scroll_acc_y >= per)  { hold_btn(Button4, 1); hold_btn(Button4, 0); scroll_acc_y -= per; }
     while (scroll_acc_y <= -per) { hold_btn(Button5, 1); hold_btn(Button5, 0); scroll_acc_y += per; }
     while (scroll_acc_x >= per)  { hold_btn(Button7, 1); hold_btn(Button7, 0); scroll_acc_x -= per; }
@@ -343,6 +351,7 @@ static Window clip_owner;               /* last seen CLIPBOARD owner */
 static int xfixes_ev_base = -1;
 static int conv_pending;                /* a conversion request is out */
 static int conv_recheck;                /* owner moved while converting */
+static double conv_deadline;            /* conv_pending expires at this time, or 0 */
 static double conv_retry_at;            /* armed re-fetch timer, or 0 */
 static int conv_retries;                /* retries spent on this owner */
 static int clip_dbg = -1;               /* LH_CLIP_DEBUG: verbose decisions */
@@ -361,6 +370,26 @@ static const char *atom_name(Atom a)
 
 #define CLIP_MAX (256 * 1024)
 
+/* Maximum valid stdin record: an op-7 (clipboard) record carries one op
+ * byte + up to CLIP_MAX bytes of text. The daemon mirrors this bound as
+ * InputRecord.maxRecordBytes in Sources/LedgehostCore/InputRecords.swift —
+ * keep the two in sync. A record announcing len 0 or len > REC_MAX is
+ * unrecoverable framing desync: the helper exits and the daemon restarts
+ * it (clamping the announced length would reinterpret attacker-controlled
+ * text bytes as further op records — audit F2/S16). */
+#define REC_MAX (CLIP_MAX + 1)
+
+static void write_all(int fd, const void *buf, size_t n)
+{
+    const char *p = buf;
+    while (n > 0) {
+        ssize_t w = write(fd, p, n);
+        if (w < 0) { if (errno == EINTR) continue; return; }
+        if (w == 0) return;
+        p += w; n -= (size_t)w;
+    }
+}
+
 static void emit_record(int op, const unsigned char *data, int n)
 {
     /* helper -> daemon, same framing as stdin: len(4, BE) + op + fields */
@@ -368,8 +397,8 @@ static void emit_record(int op, const unsigned char *data, int n)
     uint32_t len = (uint32_t)n + 1;
     hdr[0] = len >> 24; hdr[1] = len >> 16; hdr[2] = len >> 8; hdr[3] = len;
     hdr[4] = (unsigned char)op;
-    (void)!write(1, hdr, 5);
-    if (n > 0) (void)!write(1, data, n);
+    write_all(1, hdr, 5);
+    if (n > 0) write_all(1, data, n);
 }
 
 static void serve_selection(XSelectionRequestEvent *req)
@@ -414,6 +443,10 @@ static void fetch_clipboard_text(void)
 {
     if (conv_pending) { conv_recheck = 1; return; }
     conv_pending = 1;
+    /* conv_deadline bounds the wait for SelectionNotify (audit S3): an
+     * owner that never answers would otherwise wedge all later host ->
+     * device fetches until helper restart. */
+    conv_deadline = now_sec() + 2.0;
     cdbg("fetch: asking owner %lu for %s", (unsigned long)clip_owner,
          atom_name(a_utf8));
     XConvertSelection(dpy, a_clip, a_utf8, a_prop, clip_win, CurrentTime);
@@ -434,6 +467,7 @@ static void owner_moved(Window owner)
 static void got_selection_text(XSelectionEvent *sel)
 {
     conv_pending = 0;
+    conv_deadline = 0;
     if (sel->property == None || sel->target != a_utf8) {
         /* the owner refused this target or answered oddly — one
          * retry covers "owner mid-change" timing */
@@ -584,7 +618,9 @@ int main(void)
     clipboard_init();
     logf("up: keycodes %d..%d scratch %d shift %d", min_kc, max_kc, scratch_kc, shift_kc);
 
-    unsigned char buf[64 * 1024];
+    /* Sized to hold a whole maximal record (4-byte header + REC_MAX) so a
+     * legitimate device clipboard of CLIP_MAX bytes parses in one pass. */
+    static unsigned char buf[4 + REC_MAX];
     size_t have = 0;
     static unsigned char pending_move[9];
     static int pending_move_n = 0;
@@ -601,11 +637,24 @@ int main(void)
             conv_retry_at = 0;
             fetch_clipboard_text();
         }
+        if (conv_pending && conv_deadline && now_sec() >= conv_deadline) {
+            /* the owner never answered: stop waiting so later owner moves
+             * are fetched instead of piling onto conv_recheck */
+            conv_pending = 0;
+            conv_deadline = 0;
+            cdbg("fetch: no reply within deadline — rearming");
+            if (conv_recheck) {
+                conv_recheck = 0;
+                owner_moved(XGetSelectionOwner(dpy, a_clip));
+            }
+        }
         fd_set rfds;
         FD_ZERO(&rfds); FD_SET(0, &rfds); FD_SET(xfd, &rfds);
-        struct timeval tv = { 0, conv_retry_at ? 100000 : 500000 };
+        struct timeval tv = { 0,
+            (conv_retry_at || conv_deadline) ? 100000 : 500000 };
         int s = select(xfd + 1, &rfds, NULL, NULL,
-                       (xfixes_ev_base < 0 || conv_retry_at) ? &tv : NULL);
+                       (xfixes_ev_base < 0 || conv_retry_at || conv_deadline)
+                           ? &tv : NULL);
         if (s < 0) { if (errno == EINTR) continue; break; }
         if (s == 0 || !FD_ISSET(0, &rfds)) continue;
         ssize_t r = read(0, buf + have, sizeof buf - have);
@@ -613,9 +662,16 @@ int main(void)
         if (r < 0) { if (errno == EINTR) continue; break; }
         have += (size_t)r;
         size_t off = 0;
+        int fatal = 0;
         while (have - off >= 5) {
             uint32_t len = (buf[off] << 24) | (buf[off+1] << 16) | (buf[off+2] << 8) | buf[off+3];
-            if (len == 0 || len > sizeof buf - 4) { logf("bad record len %u", len); len = sizeof buf - 4; }
+            if (len == 0 || len > REC_MAX) {
+                /* unrecoverable desync — never clamp-and-parse
+                 * (audit F2/S16); die so the daemon restarts us */
+                logf("fatal: bad record len %u", len);
+                fatal = 1;
+                break;
+            }
             if (have - off < 4 + len) break;
             const unsigned char *body = buf + off + 4;   /* len covers op + fields */
             int op = body[0];
@@ -639,6 +695,7 @@ int main(void)
             default: logf("reject: unknown op %d", op); break;
             }
         }
+        if (fatal) break;
         memmove(buf, buf + off, have - off);
         have -= off;
         if (have == sizeof buf) have = 0;         /* defensive */
