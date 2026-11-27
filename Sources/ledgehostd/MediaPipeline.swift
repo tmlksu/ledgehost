@@ -30,6 +30,9 @@ final class MediaPipeline {
     /// resizes could otherwise churn the encoder continuously — at
     /// most one restart per window, latest wins.
     private var pendingRestart: Scheduled<Void>?
+    /// A queued backoff start — cancelled when the pipeline is
+    /// stopped, else it outlives the stop and respawns the helper.
+    private var pendingStart: Scheduled<Void>?
     private var lastRequestedRestart: Date = .distantPast
     private static let restartDebounce: TimeInterval = 3
 
@@ -87,7 +90,7 @@ final class MediaPipeline {
         guard running else { return }
         print(Log.stamp(), "ledgehostd: media: restarting pipeline (fps now \(fpsSource()))")
         stop(restart: true)
-        loop.scheduleTask(in: .milliseconds(300)) { [weak self] in self?.start() }
+        pendingStart = loop.scheduleTask(in: .milliseconds(300)) { [weak self] in self?.start() }
     }
 
     // MARK: - Lifecycle
@@ -120,6 +123,9 @@ final class MediaPipeline {
 
     private func stop(restart: Bool) {
         running = false
+        pendingStart?.cancel(); pendingStart = nil
+        pendingRestart?.cancel(); pendingRestart = nil
+        stopTask?.cancel(); stopTask = nil
         supervisor.stop()
         setsPayload = nil
         if !restart { backoff.reset() }
@@ -140,7 +146,7 @@ final class MediaPipeline {
             return
         }
         print(Log.stamp(), "ledgehostd: media: restart \(backoff.attempts) in \(Int(delay)) s")
-        loop.scheduleTask(in: .milliseconds(Int64(delay * 1000))) { [weak self] in self?.start() }
+        pendingStart = loop.scheduleTask(in: .milliseconds(Int64(delay * 1000))) { [weak self] in self?.start() }
     }
 
     /// Called when the helper cannot be kept alive.

@@ -166,6 +166,7 @@ wireMediaService()
 defer {
     media.shutdown()
     input.shutdown()
+    windows.stop()
     try? group.syncShutdownGracefully()
 }
 

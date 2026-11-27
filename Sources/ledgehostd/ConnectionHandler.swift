@@ -438,6 +438,10 @@ final class ConnectionHandler: ChannelInboundHandler {
             } else {
                 print(Log.stamp(), "ledgehostd: window \(String(id, radix: 16)) gone — \(label) back to no source")
                 leaveSource()
+                // A destroyed window's pipeline has nothing to capture:
+                // kill it now rather than after the 5 s no-watchers
+                // debounce — its xid target can never come back.
+                media.sourceGone(.window(id))
             }
         }
         sendWindowList(active: self.source?.wire ?? .none)
