@@ -7,8 +7,10 @@
 #   scripts/loopback-e2e.sh [port]
 #
 # Needs: swift in PATH, openssl. Exits non-zero on the first failure.
+# The default port is a scratch port — pick a free one when a deployed
+# daemon (home door or remote door) is expected on this host.
 set -u
-port="${1:-17456}"
+port="${1:-17461}"
 root="$(cd "$(dirname "$0")/.." && pwd)"
 work="$(mktemp -d)"
 trap 'kill ${HOSTPID:-} 2>/dev/null; rm -rf "$work"' EXIT
