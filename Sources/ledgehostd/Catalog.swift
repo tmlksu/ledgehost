@@ -51,9 +51,12 @@ extension ConnectionHandler {
     func sendCatalog(context: ChannelHandlerContext) {
         sendWindowList(context: context, active: .none)
         send(context: context, kind: .hostSettings, payload: Wire.encode(settingsState()))
-        let info = MacInfo(v: 1, macID: identity.macID, name: identity.name,
-                           issuedAt: Date().timeIntervalSince1970, remoteAccess: false,
-                           remotePort: port, internet: false, addresses: [])
+        // Kind 18 goes on every session, configured or not (the plan
+        // doc: one code path, the signature doubles as attestation).
+        let info = remoteConfig?.macInfo(identity: identity)
+            ?? MacInfo(v: 1, macID: identity.macID, name: identity.name,
+                       issuedAt: Date().timeIntervalSince1970, remoteAccess: false,
+                       remotePort: port, internet: false, addresses: [])
         if let signed = SignedMacInfo.signing(info, with: identity.privateKey) {
             send(context: context, kind: .macInfo, payload: Wire.encode(signed))
         }

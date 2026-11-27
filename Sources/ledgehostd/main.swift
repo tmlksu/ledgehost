@@ -42,6 +42,19 @@ do {
 print(Log.stamp(), "ledgehostd: \(identity.name) — mac id \(identity.macID), fingerprint \(Base64URL.encode(identity.fingerprint))")
 print(Log.stamp(), "ledgehostd: \(pins.count) paired device(s); config in \(configDir.path)")
 
+// Remote access (docs/remote-access-plan.md): LH_REMOTE_PORT enables
+// the remote door + the vpn address in kind 18; unset means this host
+// is a home-only host exactly as before. Bad config fails loudly here
+// — before the pairing secret's expensive derivation.
+let remoteConfig: RemoteConfig?
+do {
+    remoteConfig = try RemoteConfig.load(env: ProcessInfo.processInfo.environment,
+                                         homePort: port)
+} catch {
+    fputs("ledgehostd: invalid remote config: \(error)\n", stderr)
+    exit(2)
+}
+
 let pairing = PairingManager(identity: identity, pins: pins, port: port)
 
 // MARK: - Discovery (Avahi subprocess for Phase 0)
@@ -191,10 +204,21 @@ eventLoop.scheduleRepeatedTask(initialDelay: .seconds(2), delay: .seconds(2)) { 
 }
 
 let sslContext = try serverTLSContext(identity: identity)
+// One throttle for both doors: a source's connection budget is global.
+let throttle = ConnThrottle()
 let bootstrap = makeServerBootstrap(group: group, sslContext: sslContext,
-                                    throttle: ConnThrottle())
+                                    throttle: throttle)
 let server = try bootstrap.bind(host: "0.0.0.0", port: port).wait()
 print(Log.stamp(), "ledgehostd: listening on port \(port)")
+
+// The remote door: same bootstrap, same gates — sessions on it are
+// full sessions (docs/remote-access-plan.md §The remote door). The
+// listener is retained by the event loop, nothing needs the handle.
+if let remoteConfig {
+    _ = try bootstrap.bind(host: "0.0.0.0", port: remoteConfig.listenPort).wait()
+    print(Log.stamp(), "ledgehostd: remote door listening on port \(remoteConfig.listenPort) "
+          + "(dial \(remoteConfig.address):\(remoteConfig.dialPort) via \(remoteConfig.via))")
+}
 
 // Clean shutdown: stop advertising, close the listener.
 let cleanup: @convention(c) (Int32) -> Void = { _ in

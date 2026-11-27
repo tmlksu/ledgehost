@@ -26,6 +26,20 @@ The unit itself carries no site-specific lines. The drop-in sets:
 `scripts/install-service.sh --display :NN --prefix PATH --unit-name N
 --enable` adjusts these; see `--help`.
 
+### Remote access (optional, off by default)
+
+A second listener — the "remote door" — for devices reaching the host
+through an overlay network (docs/remote-access-plan.md). Same drop-in:
+
+    Environment=LH_REMOTE_PORT=8443        # remote door's listen port
+    Environment=LH_REMOTE_ADDRESS=w.x.y.z  # host devices dial (no port)
+    # Environment=LH_REMOTE_DIAL_PORT=443  # only if a forwarder maps it
+    # Environment=LH_REMOTE_VIA="VPN"      # display string (default VPN)
+
+Unset `LH_REMOTE_PORT` disables remote access entirely — no second
+listener. Any malformed value fails the daemon at startup (loudly, in
+the journal) rather than silently disabling the door.
+
 ## The linger requirement
 
 A user service stops when the user's last session ends — for a remote

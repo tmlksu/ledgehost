@@ -559,6 +559,12 @@ if args.mode == "pair" {
             if let signed = Wire.decode(SignedMacInfo.self, from: payload),
                let verified = signed.verified() {
                 macInfoOK = Base64URL.encode(verified.fingerprint) == saved.fingerprint
+                let i = verified.info
+                let addrs = i.addresses.map {
+                    "\($0.kind):\($0.host)\($0.port.map { ":\($0)" } ?? "") via \($0.via)"
+                }.joined(separator: ", ")
+                print("probe: macInfo remoteAccess=\(i.remoteAccess) remotePort=\(i.remotePort) "
+                      + "internet=\(i.internet) issuedAt=\(Int(i.issuedAt)) addrs=[\(addrs)]")
             }
         case .pong: pong = true
         default: break
