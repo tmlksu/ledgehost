@@ -65,6 +65,14 @@ public func readIfExists(_ url: URL) throws -> Data? {
 
 /// Timestamped print used by the daemon and probe.
 public enum Log {
+    /// Shared across threads — safe, and now proven rather than
+    /// assumed: callers include the single session event loop, the
+    /// admin socket's own loop, and FileHandle readabilityHandler
+    /// queues (one monitor thread per pipe). Foundation's DateFormatter
+    /// carries `_lock: Synchronization.Mutex<State>` and `string(from:)`
+    /// wraps its formatting in that mutex (verified in the Swift
+    /// toolchain's libFoundation disassembly; a concurrent stress test
+    /// ran clean as well).
     private static let formatter: DateFormatter = {
         let f = DateFormatter()
         f.dateFormat = "HH:mm:ss"
