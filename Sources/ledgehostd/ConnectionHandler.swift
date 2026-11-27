@@ -104,6 +104,10 @@ final class ConnectionHandler: ChannelInboundHandler {
     var source: CaptureSource?
     var watcher = MediaService.Watcher()
     var inputGate = InputGate()
+    /// The listener this connection arrived on — detected from the
+    /// channel's local address: a remote-door session's pipelines
+    /// spawn at the configured remote bitrate.
+    private(set) var remoteDoor = false
     /// kind 32: this connection asked for the host's copies.
     var clipboardSubscribed = false
     /// Timestamps of the connection's kind 32s taken in the last
@@ -393,7 +397,7 @@ final class ConnectionHandler: ChannelInboundHandler {
                 send(context: context, kind: .parameterSets, payload: sets,
                      keyframe: true)
             }
-            media.watcherJoined(s)
+            media.watcherJoined(s, remoteDoor: remoteDoor)
             if !wasWatching { input.watcherJoined() }
             media.requestKeyframe(s)
         }
@@ -563,6 +567,7 @@ final class ConnectionHandler: ChannelInboundHandler {
 
     func channelActive(context: ChannelHandlerContext) {
         channel = context.channel
+        remoteDoor = context.channel.localAddress?.port == remoteConfig?.listenPort
         label = peer.fingerprint.map { RemoteIdentityShortName($0) } ?? context.channel.remoteAddress.map { "\($0)" } ?? "?"
         // Bound the TLS handshake: crypto runs on this
         // same event loop, so an unfinished handshake cannot idle here.

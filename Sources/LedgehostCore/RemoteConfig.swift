@@ -15,6 +15,7 @@ public enum RemoteConfigError: Error, Equatable {
     case addressCarriesPort(String)   // "host:port" — the port lives in remotePort
     case badVia                       // set but blank
     case remotePortIsHomePort         // would double-bind the home door
+    case badBitrate(String)           // non-integer, negative, or absurd
 }
 
 public struct RemoteConfig: Equatable {
@@ -27,12 +28,25 @@ public struct RemoteConfig: Equatable {
     public let address: String
     /// MacAddress.via display string (LH_REMOTE_VIA, default "VPN").
     public let via: String
+    /// The initial encoder bitrate (kbps) for a pipeline created by a
+    /// remote-door session (LH_REMOTE_BITRATE_KBPS). nil means "no
+    /// remote default — start at the home default". Only the creating
+    /// session's door sets the spawn value; later changeSettings from
+    /// any viewer retunes the shared pipeline as usual.
+    public let bitrateKbps: Int?
 
     public static let envPort = "LH_REMOTE_PORT"
     public static let envAddress = "LH_REMOTE_ADDRESS"
     public static let envDialPort = "LH_REMOTE_DIAL_PORT"
     public static let envVia = "LH_REMOTE_VIA"
+    public static let envBitrateKbps = "LH_REMOTE_BITRATE_KBPS"
     public static let defaultVia = "VPN"
+    /// Remote default when remote access is on and the var is unset:
+    /// the LAN-tuned 15 Mbps start overruns a thin WARP path.
+    public static let defaultBitrateKbps = 6000
+    /// Sanity bound — a typo'd bitrate is caught here, not at the
+    /// encoder property.
+    public static let maxBitrateKbps = 1_000_000
 
     /// Parse the environment; nil when LH_REMOTE_PORT is unset or
     /// blank — remote access disabled. Throws RemoteConfigError on
@@ -76,8 +90,21 @@ public struct RemoteConfig: Equatable {
             via = v
         }
 
+        // Unset = 6000 kbps; 0 = no remote default (home default on
+        // the remote door too); anything non-integer, negative or
+        // absurd is the same loud startup failure as the other vars.
+        var bitrateKbps: Int? = defaultBitrateKbps
+        if let rawKbps = env[envBitrateKbps]?.trimmingCharacters(in: .whitespaces),
+           !rawKbps.isEmpty {
+            guard let kbps = Int(rawKbps), (0...maxBitrateKbps).contains(kbps) else {
+                throw RemoteConfigError.badBitrate("\(envBitrateKbps)=\(rawKbps)")
+            }
+            bitrateKbps = kbps == 0 ? nil : kbps
+        }
+
         return RemoteConfig(listenPort: listenPort, dialPort: dialPort,
-                            address: address, via: via)
+                            address: address, via: via,
+                            bitrateKbps: bitrateKbps)
     }
 
     /// The MacInfo the remote door advertises (and every session's

@@ -77,6 +77,49 @@ final class RemoteConfigTests: XCTestCase {
         XCTAssertThrowsError(try RemoteConfig.load(env: env6, homePort: 7455))
     }
 
+    // --- LH_REMOTE_BITRATE_KBPS (remote-door initial bitrate) ---
+
+    func testBitrateDefaultsTo6000WhenEnabled() throws {
+        let c = try RemoteConfig.load(env: [
+            "LH_REMOTE_PORT": "17470",
+            "LH_REMOTE_ADDRESS": "192.0.2.10",
+        ], homePort: 7455)
+        XCTAssertEqual(c?.bitrateKbps, 6000)
+    }
+
+    func testBitrateExplicitValue() throws {
+        let c = try RemoteConfig.load(env: [
+            "LH_REMOTE_PORT": "17470",
+            "LH_REMOTE_ADDRESS": "192.0.2.10",
+            "LH_REMOTE_BITRATE_KBPS": "2500",
+        ], homePort: 7455)
+        XCTAssertEqual(c?.bitrateKbps, 2500)
+    }
+
+    func testBitrateZeroMeansHomeDefault() throws {
+        let c = try RemoteConfig.load(env: [
+            "LH_REMOTE_PORT": "17470",
+            "LH_REMOTE_ADDRESS": "192.0.2.10",
+            "LH_REMOTE_BITRATE_KBPS": "0",
+        ], homePort: 7455)
+        XCTAssertNil(c?.bitrateKbps)
+    }
+
+    func testBitrateValidationFailures() throws {
+        let base: [String: String] = ["LH_REMOTE_PORT": "17470", "LH_REMOTE_ADDRESS": "192.0.2.10"]
+        for v in ["abc", "-1", "2000000"] {
+            var env = base; env["LH_REMOTE_BITRATE_KBPS"] = v
+            XCTAssertThrowsError(try RemoteConfig.load(env: env, homePort: 7455)) {
+                guard case .badBitrate = ($0 as? RemoteConfigError) else {
+                    return XCTFail("\(v): expected badBitrate, got \($0)")
+                }
+            }
+        }
+        // Blank falls back to the remote default
+        var env = base; env["LH_REMOTE_BITRATE_KBPS"] = "  "
+        XCTAssertEqual(try RemoteConfig.load(env: env, homePort: 7455)?.bitrateKbps, 6000)
+    }
+
     // --- MacInfo construction (proof f: unit-test the daemon side) ---
 
     private func scratchIdentity() throws -> HostIdentity {

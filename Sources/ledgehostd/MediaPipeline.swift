@@ -19,6 +19,7 @@ final class MediaPipeline {
 
     private let loop: EventLoop
     private let fpsSource: () -> Int      // max wanted fps across THIS source's sessions
+    private let bitrateKbps: Int          // spawn-time encoder target (per-60fps wire kbps)
     private let supervisor: HelperSupervisor
 
     private var reader = MediaRecordReader()
@@ -47,10 +48,12 @@ final class MediaPipeline {
     init(group: EventLoopGroup,
          display: String,
          xauthority: String?,
+         bitrateKbps: Int,
          arguments: @escaping () -> [String],
          fpsSource: @escaping () -> Int) {
         self.loop = group.next()
         self.fpsSource = fpsSource
+        self.bitrateKbps = bitrateKbps
         supervisor = HelperSupervisor(
             loop: loop,
             display: display,
@@ -117,7 +120,8 @@ final class MediaPipeline {
         reader = MediaRecordReader()
         guard supervisor.start() else { helperFailed(); return }
         running = true
-        runningInfo = RunningInfo(width: 0, height: 0, fps: fpsSource(), mbps: 15)
+        runningInfo = RunningInfo(width: 0, height: 0, fps: fpsSource(),
+                                  mbps: bitrateKbps * fpsSource() / 60 / 1000)
         print(Log.stamp(), "ledgehostd: media: pipeline starting (fps \(fpsSource()))")
     }
 

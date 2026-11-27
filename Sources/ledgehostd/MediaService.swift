@@ -64,6 +64,9 @@ final class MediaService {
     private let group: EventLoopGroup
     private let display: String
     private let xauthority: String?
+    /// Initial encoder bitrate for pipelines created by remote-door
+    /// sessions (LH_REMOTE_BITRATE_KBPS); nil = home default.
+    private let remoteBitrateKbps: Int?
     /// max wanted fps among the sessions watching a given source.
     private let fpsSource: (CaptureSource) -> Int
 
@@ -75,21 +78,33 @@ final class MediaService {
     init(group: EventLoopGroup,
          display: String,
          xauthority: String?,
+         remoteBitrateKbps: Int? = nil,
          fpsSource: @escaping (CaptureSource) -> Int) {
         self.loop = group.next()
         self.group = group
         self.display = display
         self.xauthority = xauthority
+        self.remoteBitrateKbps = remoteBitrateKbps
         self.fpsSource = fpsSource
     }
 
-    private func pipeline(for source: CaptureSource) -> MediaPipeline {
+    /// The shared pipeline for a source, created on first use.
+    /// `initialBitrateKbps` applies ONLY when this call creates the
+    /// pipeline: pipelines are shared per CaptureSource, so the door
+    /// of the session that first selects a source sets the spawn-time
+    /// bitrate — a remote session joining an existing pipeline does
+    /// not retune it, and changeSettings from any viewer applies
+    /// afterwards as usual (setBitrate).
+    private func pipeline(for source: CaptureSource,
+                          initialBitrateKbps: Int? = nil) -> MediaPipeline {
         if let p = pipelines[source] { return p }
+        let kbps = initialBitrateKbps ?? 15_000
         let p = MediaPipeline(group: group, display: display, xauthority: xauthority,
+                              bitrateKbps: kbps,
                               arguments: {
                                   var args = ["--source", "x11",
                                               "--fps", String(self.fpsSource(source)),
-                                              "--bitrate", "15000000"]
+                                              "--bitrate", String(kbps * 1000)]
                                   if case .window(let xid) = source {
                                       args += ["--xid", String(xid)]
                                   }
@@ -107,8 +122,12 @@ final class MediaService {
 
     // MARK: - Watcher tracking (the event loop calls these)
 
-    func watcherJoined(_ source: CaptureSource) {
-        loop.execute { self.pipeline(for: source).watcherJoined() }
+    /// `remoteDoor` marks a session that arrived on the remote
+    /// listener: a pipeline IT creates starts at the remote default
+    /// bitrate (unless the config opts out).
+    func watcherJoined(_ source: CaptureSource, remoteDoor: Bool = false) {
+        let kbps = remoteDoor ? remoteBitrateKbps : nil
+        loop.execute { self.pipeline(for: source, initialBitrateKbps: kbps).watcherJoined() }
     }
 
     func watcherLeft(_ source: CaptureSource, hasWatchers: Bool) {
