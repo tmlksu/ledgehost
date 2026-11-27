@@ -30,10 +30,13 @@ final class SessionRegistry {
     var pairingDoors = 0
     static let maxPairingDoors = 4
 
-    var watchers: [ConnectionHandler] { sessions.values.filter { $0.watchingDesktop } }
+    var watchers: [ConnectionHandler] { sessions.values.filter { $0.source != nil } }
+    func watchers(of source: CaptureSource) -> [ConnectionHandler] {
+        sessions.values.filter { $0.source == source }
+    }
 
-    var maxWantedFPS: Int {
-        watchers.map { $0.inputGate.wantedFPS }.max() ?? 60
+    func maxWantedFPS(of source: CaptureSource) -> Int {
+        watchers(of: source).map { $0.inputGate.wantedFPS }.max() ?? 60
     }
 }
 
@@ -96,7 +99,9 @@ final class ConnectionHandler: ChannelInboundHandler {
     private var inputLog = LogSampler()
     var msgLog = LogSampler()
     var label = "?"
-    var watchingDesktop = false
+    /// What this session streams; nil watches nothing (phase 2:
+    /// sources generalize — desktop is no longer the only one).
+    var source: CaptureSource?
     var watcher = MediaService.Watcher()
     var inputGate = InputGate()
     /// kind 32: this connection asked for the host's copies.
@@ -123,11 +128,11 @@ final class ConnectionHandler: ChannelInboundHandler {
     /// outbound buffer passes the high-water mark the session drops AUs;
     /// on becoming writable it rejoins via kind 0 + the next IDR.
     private func updateDropping() {
-        guard let channel, watchingDesktop else { return }
+        guard let channel, source != nil else { return }
         if !channel.isWritable && watcher.state == .live {
             watcher.state = .dropping
             print(Log.stamp(), "ledgehostd: session \(label) over the water mark — dropping AUs, forcing IDR")
-            media.requestKeyframe()
+            if let source { media.requestKeyframe(source) }
         } else if channel.isWritable && watcher.state == .dropping {
             watcher.state = .needsIDR
             print(Log.stamp(), "ledgehostd: session \(label) writable again — rejoin on next IDR")
@@ -273,10 +278,10 @@ final class ConnectionHandler: ChannelInboundHandler {
                 handleViewport(payload: payload)
             case .keyframeRequest:
                 // At most one a second per connection (the wire rule);
-                // the service coalesces forced IDRs globally at 250 ms.
-                if Date().timeIntervalSince(watcher.lastKeyframeRequest) >= 1 {
+                // the service coalesces forced IDRs per pipeline at 250 ms.
+                if let source, Date().timeIntervalSince(watcher.lastKeyframeRequest) >= 1 {
                     watcher.lastKeyframeRequest = Date()
-                    media.requestKeyframe()
+                    media.requestKeyframe(source)
                 }
             case .clientStats:
                 if let stats = Wire.decode(ClientStats.self, from: payload),
@@ -315,51 +320,127 @@ final class ConnectionHandler: ChannelInboundHandler {
         switch source {
         case .desktop:
             print(Log.stamp(), "ledgehostd: \(label) selected the desktop")
-            if registry.injector !== self && registry.injector != nil {
-                // Arbitration moved: release what the previous injector
-                // held before the new one takes over.
-                input.releaseHeld()
-                print(Log.stamp(), "ledgehostd: input injector -> \(label)")
-            }
-            registry.injector = self
-            if !watchingDesktop {
-                watchingDesktop = true
-                watcher = MediaService.Watcher()       // .needsIDR
-                inputGate = InputGate()
-                try? channel?.setOption(ChannelOptions.writeBufferWaterMark,
-                                        value: .init(low: MediaService.highWaterBytes / 2,
-                                                     high: MediaService.highWaterBytes))
-                send(context: context, kind: .cursorShape,
-                     payload: CursorShapeBlob.encode(hotspot: CGPoint(x: 0, y: 0),
-                                                     size: CGSize(width: 16, height: 16),
-                                                     png: cursorPNG))
-                if let sets = media.setsPayload {
-                    send(context: context, kind: .parameterSets, payload: sets,
-                         keyframe: true)
-                }
-                media.watcherJoined()
-                input.watcherJoined()
-                media.requestKeyframe()
-            }
-            sendWindowList(context: context, active: .desktop)
+            becomeWatcher(of: .desktop, context: context)
         case .none:
-            if watchingDesktop {
-                watchingDesktop = false
-                if registry.injector === self {
-                    registry.injector = nil
-                    input.releaseHeld()
-                }
-                media.watcherLeft(hasWatchers: !registry.watchers.isEmpty)
-                input.watcherLeft(hasWatchers: !registry.watchers.isEmpty)
-                print(Log.stamp(), "ledgehostd: \(label) unselected the desktop")
-            }
+            print(Log.stamp(), "ledgehostd: \(label) unselected its source")
+            leaveSource()
             sendWindowList(context: context, active: .none)
         case .window(let id):
-            // This host lists no windows; the client re-asserts the
-            // current source through the list.
-            print(Log.stamp(), "ledgehostd: \(label) selected window \(id) — no windows on this host")
-            sendWindowList(context: context, active: watchingDesktop ? .desktop : .none)
+            guard windows.window(id) != nil else {
+                // Stale or unknown id: refuse by re-asserting the
+                // current source through a fresh list (same pattern
+                // as phase 1's refusal).
+                if msgLog.emit() != nil {
+                    print(Log.stamp(), "ledgehostd: \(label) selected unknown window \(String(id, radix: 16)) — list resent")
+                }
+                sendWindowList(context: context, active: self.source?.wire ?? .none)
+                return
+            }
+            print(Log.stamp(), "ledgehostd: \(label) selected window \(String(id, radix: 16))")
+            becomeWatcher(of: .window(id), context: context)
         }
+    }
+
+    /// Track the watched window's last known rect so geometry events
+    /// can tell a move (input rect only) from a resize (pipeline
+    /// restart + input rect).
+    private var watchedRect: (x: Int, y: Int, w: Int, h: Int)?
+
+    /// The screen rectangle the injector's input fractions map onto
+    /// (input op 9): the watched window's current rect, or the root
+    /// rect for the desktop source.
+    private func pushSourceRect() {
+        guard registry.injector === self, let source else { return }
+        switch source {
+        case .desktop:
+            if let root = windows.rootSize {
+                input.setSourceRect(x: 0, y: 0, width: root.w, height: root.h)
+            }
+        case .window(let id):
+            if let w = windows.window(id) {
+                input.setSourceRect(x: w.x, y: w.y, width: w.width, height: w.height)
+            }
+        }
+    }
+
+    /// This session starts (or switches to) watching `s`: injector
+    /// arbitration, per-source pipeline join, resume state reset.
+    private func becomeWatcher(of s: CaptureSource, context: ChannelHandlerContext) {
+        if registry.injector !== self && registry.injector != nil {
+            // Arbitration moved: release what the previous injector
+            // held before the new one takes over.
+            input.releaseHeld()
+            print(Log.stamp(), "ledgehostd: input injector -> \(label)")
+        }
+        registry.injector = self
+        if source != s {
+            if let old = source {
+                media.watcherLeft(old, hasWatchers: !registry.watchers(of: old).isEmpty)
+            }
+            let wasWatching = source != nil
+            source = s
+            watchedRect = nil
+            watcher = MediaService.Watcher()       // .needsIDR
+            inputGate = InputGate()
+            try? channel?.setOption(ChannelOptions.writeBufferWaterMark,
+                                    value: .init(low: MediaService.highWaterBytes / 2,
+                                                 high: MediaService.highWaterBytes))
+            send(context: context, kind: .cursorShape,
+                 payload: CursorShapeBlob.encode(hotspot: CGPoint(x: 0, y: 0),
+                                                 size: CGSize(width: 16, height: 16),
+                                                 png: cursorPNG))
+            if let sets = media.setsPayload(s) {
+                send(context: context, kind: .parameterSets, payload: sets,
+                     keyframe: true)
+            }
+            media.watcherJoined(s)
+            if !wasWatching { input.watcherJoined() }
+            media.requestKeyframe(s)
+        }
+        if case .window(let id) = s, let w = windows.window(id) {
+            watchedRect = (w.x, w.y, w.width, w.height)
+        }
+        pushSourceRect()
+        sendWindowList(context: context, active: s.wire)
+    }
+
+    /// This session stops watching its source: leave its pipeline,
+    /// release the injector slot if held. (Also the destroyed-window
+    /// path — same end state, per the phase-2 plan.)
+    private func leaveSource() {
+        guard let s = source else { return }
+        source = nil
+        watchedRect = nil
+        if registry.injector === self {
+            registry.injector = nil
+            input.releaseHeld()
+        }
+        media.watcherLeft(s, hasWatchers: !registry.watchers(of: s).isEmpty)
+        input.watcherLeft(hasWatchers: !registry.watchers.isEmpty)
+    }
+
+    /// The tracker's window list changed: follow a watched window's
+    /// geometry, drop a watched window that is gone, push every
+    /// session the fresh list (phase 2 requirement: live lists).
+    func windowListChanged() {
+        if case .window(let id) = source {
+            if let w = windows.window(id) {
+                let r = (x: w.x, y: w.y, w: w.width, h: w.height)
+                if watchedRect == nil || watchedRect! != r {
+                    let resized = watchedRect.map { $0.w != r.w || $0.h != r.h } ?? false
+                    watchedRect = r
+                    if resized {
+                        print(Log.stamp(), "ledgehostd: window \(String(id, radix: 16)) resized to \(r.w)x\(r.h) — restarting its pipeline")
+                        media.sourceResized(.window(id))
+                    }
+                    pushSourceRect()
+                }
+            } else {
+                print(Log.stamp(), "ledgehostd: window \(String(id, radix: 16)) gone — \(label) back to no source")
+                leaveSource()
+            }
+        }
+        sendWindowList(active: self.source?.wire ?? .none)
     }
 
     /// kind 8 → op records for the input helper. Only the injector
@@ -410,9 +491,12 @@ final class ConnectionHandler: ChannelInboundHandler {
         let wanted = min(max(v.fps ?? 60, 24), settings.maxFPS)
         if wanted != inputGate.wantedFPS {
             inputGate.wantedFPS = wanted
-            print(Log.stamp(), "ledgehostd: \(label) wants \(wanted) fps (stream max \(registry.maxWantedFPS))")
-            if registry.maxWantedFPS != media.runningInfo.fps {
-                media.restart()
+            if let source {
+                let maxFPS = registry.maxWantedFPS(of: source)
+                print(Log.stamp(), "ledgehostd: \(label) wants \(wanted) fps (stream max \(maxFPS))")
+                media.restartIfWantedFPSMoved()
+            } else {
+                print(Log.stamp(), "ledgehostd: \(label) wants \(wanted) fps")
             }
         }
     }
@@ -467,7 +551,7 @@ final class ConnectionHandler: ChannelInboundHandler {
         }
         if fpsChanged {
             for w in registry.watchers { w.inputGate.wantedFPS = min(w.inputGate.wantedFPS, settings.maxFPS) }
-            if registry.maxWantedFPS != media.runningInfo.fps { media.restart() }
+            media.restartIfWantedFPSMoved()
         }
         print(Log.stamp(), "ledgehostd: \(label) changed settings: \(applied.isEmpty ? "none applied" : applied.joined(separator: " "))\(ignored.isEmpty ? "" : " — ignored: \(ignored.joined(separator: ", "))")")
         send(context: context, kind: .hostSettings, payload: Wire.encode(settingsState(answering: change.token)))
@@ -495,15 +579,7 @@ final class ConnectionHandler: ChannelInboundHandler {
         tick?.cancel()
         deadline?.cancel()
         if holdsPairingDoor { registry.pairingDoors -= 1; holdsPairingDoor = false }
-        if watchingDesktop {
-            watchingDesktop = false
-            if registry.injector === self {
-                registry.injector = nil
-                input.releaseHeld()
-            }
-            media.watcherLeft(hasWatchers: !registry.watchers.isEmpty)
-            input.watcherLeft(hasWatchers: !registry.watchers.isEmpty)
-        }
+        leaveSource()
         let wasSubscribed = clipboardSubscribed
         clipboardSubscribed = false
         clipboardArrivals = []

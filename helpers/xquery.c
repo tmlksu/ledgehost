@@ -12,7 +12,8 @@
  *                           whose WM_NAME contains NAME
  *   xquery focus            print the input-focus window's name
  *   xquery windows          one snapshot of listable windows:
- *                           "win <xid-hex> <x> <y> <w> <h> <title>" per
+ *                           "root <w> <h>", then "win <xid-hex> <x>
+ *                           <y> <w> <h> <class> <title>" per
  *                           window (coordinates root-absolute, title
  *                           _NET_WM_NAME falling back to WM_NAME,
  *                           controls blanked), then "." — windows are
@@ -203,6 +204,24 @@ static void win_title(Window w, char *buf, int n)
         if ((unsigned char)buf[i] < 0x20 || buf[i] == 0x7f) buf[i] = ' ';
 }
 
+/* WM_CLASS is "instance\0class\0"; the class part names the app.
+ * Whitespace and controls fold to "_" so the column never splits. */
+static void win_class(Window w, char *buf, int n)
+{
+    unsigned long len = 0;
+    unsigned char *p = prop(w, XInternAtom(d, "WM_CLASS", False), XA_STRING, &len);
+    buf[0] = 0;
+    if (p) {
+        size_t first = strnlen((char *)p, len);
+        const char *cls = first + 1 < len ? (char *)p + first + 1 : (char *)p;
+        snprintf(buf, n, "%s", cls);
+        XFree(p);
+    }
+    for (int i = 0; buf[i]; i++)
+        if ((unsigned char)buf[i] <= 0x20 || buf[i] == 0x7f) buf[i] = '_';
+    if (!buf[0]) snprintf(buf, n, "-");
+}
+
 static int win_is_desktop(Window w)
 {
     unsigned long n = 0;
@@ -217,9 +236,14 @@ static int win_is_desktop(Window w)
     return desk;
 }
 
-/* Snapshot the listable windows: one "win" line each, "." terminator. */
+/* Snapshot the listable windows: a "root" line (the desktop rect the
+ * desktop source captures and input defaults to), one "win" line per
+ * window, "." terminator. */
 static void win_snapshot(Window root)
 {
+    XWindowAttributes ra;
+    if (XGetWindowAttributes(d, root, &ra))
+        printf("root %d %d\n", (int)ra.width, (int)ra.height);
     unsigned long n = 0;
     unsigned char *p = prop(root, a_client_list, XA_WINDOW, &n);
     if (!p) { puts("."); fflush(stdout); return; }
@@ -235,10 +259,11 @@ static void win_snapshot(Window root)
         int rx = 0, ry = 0; Window child;
         if (!XTranslateCoordinates(d, w, root, 0, 0, &rx, &ry, &child))
             { rx = wa.x; ry = wa.y; }
-        char title[256];
+        char title[256], cls[128];
         win_title(w, title, sizeof title);
-        printf("win %lx %d %d %d %d %s\n", (unsigned long)w,
-               rx, ry, (int)wa.width, (int)wa.height, title);
+        win_class(w, cls, sizeof cls);
+        printf("win %lx %d %d %d %d %s %s\n", (unsigned long)w,
+               rx, ry, (int)wa.width, (int)wa.height, cls, title);
     }
     XFree(p);
     puts(".");

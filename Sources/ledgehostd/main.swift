@@ -85,10 +85,13 @@ let targetDisplay = processEnv["DISPLAY"] ?? ""
 let media = MediaService(group: group,
                          display: targetDisplay,
                          xauthority: processEnv["XAUTHORITY"],
-                         fpsSource: { registry.maxWantedFPS })
+                         fpsSource: { registry.maxWantedFPS(of: $0) })
 let input = InputService(group: group,
                          display: targetDisplay,
                          xauthority: processEnv["XAUTHORITY"])
+let windows = WindowTracker(loop: eventLoop,
+                            display: targetDisplay,
+                            xauthority: processEnv["XAUTHORITY"])
 wireClipboardRelay()      // input.onClipboard -> subscribed sessions
 
 // MARK: - Media fan-out (kind 0/1 to every watcher)
@@ -101,18 +104,18 @@ func buildMessage(_ kind: StreamMessageKind, timestamp: Double, keyframe: Bool, 
 }
 
 func wireMediaService() {
-    media.onSetsChanged = { payload in
+    media.onSetsChanged = { source, payload in
         var buf = buildMessage(.parameterSets, timestamp: Date().timeIntervalSince1970,
                                keyframe: true, payload: payload)
         // kind 0 is never dropped — a session that cannot take it must
         // wait for the resume path's copy, not lose the sets.
-        for session in registry.watchers {
+        for session in registry.watchers(of: source) {
             session.deliver(buf.readSlice(length: buf.readableBytes) ?? buf)
         }
     }
-    media.onFrame = { ts, au, isIDR in
+    media.onFrame = { source, ts, au, isIDR in
         var frameBuf = buildMessage(.frame, timestamp: ts, keyframe: isIDR, payload: au.frame)
-        for session in registry.watchers {
+        for session in registry.watchers(of: source) {
             switch session.watcher.state {
             case .live:
                 session.deliver(frameBuf.readSlice(length: frameBuf.readableBytes) ?? frameBuf)
@@ -124,7 +127,7 @@ func wireMediaService() {
                     continue
                 }
                 // Resume atomically: kind 0 then the IDR, one flush.
-                if let sets = media.setsPayload {
+                if let sets = media.setsPayload(source) {
                     session.writeNoFlush(buildMessage(.parameterSets,
                                                       timestamp: Date().timeIntervalSince1970,
                                                       keyframe: true, payload: sets))
@@ -136,15 +139,25 @@ func wireMediaService() {
             }
         }
     }
-    media.onGiveUp = {
+    media.onGiveUp = { source in
+        // A pipeline that cannot stay up gives up only its own
+        // watchers — sessions on other sources are unaffected.
         let goodbye = Wire.encode(Goodbye(reason: "quit",
-                                          message: "The desktop stream could not start on this host.",
+                                          message: "The stream could not start on this host.",
                                           reconnect: true))
-        for session in registry.sessions.values {
+        for session in registry.watchers(of: source) {
             session.send(kind: .goodbye, payload: goodbye)
             session.closeSoon()
         }
     }
+    // Live window lists: tracker changes fan out to every session
+    // (each also follows its watched window or drops a gone one).
+    windows.onChange = {
+        for session in registry.sessions.values {
+            session.windowListChanged()
+        }
+    }
+    windows.start()
 }
 
 // MARK: - Server

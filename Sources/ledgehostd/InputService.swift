@@ -58,6 +58,9 @@ final class InputService {
         guard supervisor.start() else { return }
         running = true
         send([InputRecord.clipboardWatch(clipboardWatchCount)])
+        if let r = sourceRect {
+            send([InputRecord.sourceRect(x: r.x, y: r.y, width: r.w, height: r.h)])
+        }
     }
 
     private func stop() {
@@ -94,6 +97,17 @@ final class InputService {
     }
 
     private var clipboardWatchCount = 0
+
+    /// op 9 (phase 2): the screen rectangle input fractions map onto —
+    /// the injector's watched window, or the root rect for desktop.
+    /// Re-pushed at every start like the subscriber count (a fresh
+    /// helper defaults to the root window it measured itself).
+    func setSourceRect(x: Int, y: Int, width: Int, height: Int) {
+        sourceRect = (x, y, width, height)
+        send([InputRecord.sourceRect(x: x, y: y, width: width, height: height)])
+    }
+
+    private var sourceRect: (x: Int, y: Int, w: Int, h: Int)?
 
     /// The injecting session ended (or the arbitration moved): release
     /// everything it held.

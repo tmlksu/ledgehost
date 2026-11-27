@@ -20,9 +20,13 @@ setvbuf(stdout, nil, _IONBF, 0)
 //
 //   ledgehost-probe pair    --host H --port P --code 482913557208
 //   ledgehost-probe connect --host H --port P
-//   ledgehost-probe record  --host H --port P --seconds N --out DIR
-//                           (subscribes to the desktop, saves kind 0/1
-//                           payloads plus a reassembled .h265 stream)
+//   ledgehost-probe record  --host H --port P --seconds N --out DIR [--window ID]
+//                           (subscribes to the desktop — or the window,
+//                           decimal or 0x-hex — saves kind 0/1 payloads
+//                           plus a reassembled .h265 stream)
+//   ledgehost-probe windows --host H --port P
+//                           prints the host's window list (id, geometry,
+//                           class, title) and exits
 //   ledgehost-probe input   --host H --port P --script "SCRIPT"
 //                           (subscribes to the desktop, sends the
 //                           scripted kind 8 events; see inputScript)
@@ -43,6 +47,7 @@ struct Args {
     var stall: Double = 0
     var text: String = ""
     var show = false
+    var window: UInt32?
     var count = 1
     var stop = false
 }
@@ -64,6 +69,10 @@ func parseArgs() -> Args {
         case "--count": args.count = Int(it.next() ?? "") ?? args.count
         case "--stop": args.stop = true
         case "--stall": args.stall = Double(it.next() ?? "") ?? args.stall
+        case "--window":
+            let v = it.next() ?? ""
+            args.window = v.hasPrefix("0x")
+                ? UInt32(String(v.dropFirst(2)), radix: 16) : UInt32(v)
         default: break
         }
     }
@@ -71,7 +80,7 @@ func parseArgs() -> Args {
 }
 
 let args = parseArgs()
-guard ["pair", "connect", "record", "input", "clipboard"].contains(args.mode) else {
+guard ["pair", "connect", "record", "input", "clipboard", "windows"].contains(args.mode) else {
     fputs("usage: ledgehost-probe pair --code <12 digits> [--host H] [--port P]\n       ledgehost-probe connect [--host H] [--port P]\n       ledgehost-probe record [--host H] [--port P] [--seconds N] [--out DIR]\n", stderr)
     exit(64)
 }
@@ -257,6 +266,33 @@ if args.mode == "pair" {
     try atomicWrite(JSONEncoder().encode(saved), to: savedHostURL)
     print("probe: PAIRED with \(saved.name) (\(macID)); pin saved")
     try? channel.close().wait()
+} else if args.mode == "windows" {
+    // Phase 2: print the host's live window list (id = xid).
+    guard let saved = savedHost else {
+        fputs("probe: no saved host — pair first\n", stderr); exit(64)
+    }
+    let hostBox = HostBox()
+    let collector = Collector()
+    var list: WindowList?
+    collector.onMessage = { kind, payload, _ts in
+        if kind == .windowList { list = Wire.decode(WindowList.self, from: payload) }
+    }
+    let channel = try connect(alpn: "sill/1", hostBox: hostBox, collector: collector)
+    guard waitFor(5, until: { hostBox.fingerprint != nil }),
+          Base64URL.encode(hostBox.fingerprint!) == saved.fingerprint else {
+        print("probe: handshake/pin failure"); try? channel.close().wait(); exit(1)
+    }
+    send(channel, kind: .hello, payload: Wire.encode(Hello(appVersion: "0.0.0-probe", protocol: 1,
+                                                           device: "ledgehost-probe", audio: [])))
+    guard waitFor(5, until: { list != nil }) else {
+        fputs("probe: no window list\n", stderr); exit(1)
+    }
+    for w in list!.windows {
+        print("window \(String(w.id, radix: 16)) \(w.width)x\(w.height) \(w.appName) \(w.title)")
+    }
+    print("probe: \(list!.windows.count) window(s), active \(list!.active)")
+    try? channel.close().wait()
+    exit(0)
 } else if args.mode == "record" {
     // P1-M1 record mode: subscribe to the desktop, save every kind 0/1
     // payload with its header flags and timestamp, and reassemble an
@@ -332,7 +368,8 @@ if args.mode == "pair" {
         fputs("probe: no window list received\n", stderr); exit(1)
     }
     selectSentAt = Date()
-    send(channel, kind: .selectSource, payload: Wire.encode(StreamSource.desktop))
+    send(channel, kind: .selectSource,
+         payload: Wire.encode(args.window.map(StreamSource.window) ?? .desktop))
     // per-second ClientStats like a real client (P1-M4 soak)
     channel.eventLoop.scheduleRepeatedTask(initialDelay: .seconds(1), delay: .seconds(1)) { _ in
         send(channel, kind: .clientStats, payload: Wire.encode(
@@ -446,7 +483,8 @@ if args.mode == "pair" {
     guard waitFor(5, until: { listSeen }) else {
         fputs("probe: no window list\n", stderr); exit(1)
     }
-    send(channel, kind: .selectSource, payload: Wire.encode(StreamSource.desktop))
+    send(channel, kind: .selectSource,
+         payload: Wire.encode(args.window.map(StreamSource.window) ?? .desktop))
     _ = waitFor(3, until: { gotSets && gotFrame })
     func num(_ s: String) -> Double {
         let t = s.hasPrefix("0x") ? String(s.dropFirst(2)) : s

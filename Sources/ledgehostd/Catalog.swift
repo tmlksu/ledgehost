@@ -8,11 +8,24 @@ import LedgehostCore
 // the window list, the settings state, the signed host info.
 
 extension ConnectionHandler {
+    /// The live window list: entries come from WindowTracker (phase
+    /// 2 — ids are xids), active is the session's current source.
     func sendWindowList(context: ChannelHandlerContext, active: StreamSource) {
-        let list = WindowList(macName: identity.name, windows: [], active: active,
+        let list = WindowList(macName: identity.name, windows: windows.wireWindows,
+                              active: active,
                               launchID: identity.launchID, hostVersion: "0.0.0-linux",
                               protocol: 1, clipboard: ClipboardPolicy.generation)
         send(context: context, kind: .windowList, payload: Wire.encode(list))
+    }
+
+    /// Same push without a handler context (window-list updates fired
+    /// by the tracker, not a client message).
+    func sendWindowList(active: StreamSource) {
+        let list = WindowList(macName: identity.name, windows: windows.wireWindows,
+                              active: active,
+                              launchID: identity.launchID, hostVersion: "0.0.0-linux",
+                              protocol: 1, clipboard: ClipboardPolicy.generation)
+        send(kind: .windowList, payload: Wire.encode(list))
     }
 
     func settingsState(answering: Int? = nil) -> HostSettingsState {
@@ -23,11 +36,14 @@ extension ConnectionHandler {
             persistent: false, virtualDisplayAvailable: false,
             virtualDisplayNote: "virtual display is not available on this host",
             softwareEncoder: false,
-            stream: media.runningInfo.fps > 0
-                ? RunningStream(width: media.runningInfo.width, height: media.runningInfo.height,
-                                fps: media.runningInfo.fps, mbps: media.runningInfo.mbps,
-                                onVirtualDisplay: false)
-                : nil,
+            stream: {
+                let info = media.runningInfo(source ?? .desktop)
+                return info.fps > 0
+                    ? RunningStream(width: info.width, height: info.height,
+                                    fps: info.fps, mbps: info.mbps,
+                                    onVirtualDisplay: false)
+                    : nil
+            }(),
             answering: answering,
             sessionPaired: true)
     }
