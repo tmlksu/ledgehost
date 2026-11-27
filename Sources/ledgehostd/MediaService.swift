@@ -60,8 +60,6 @@ final class MediaService {
 
     /// high-water per decision 4: max(4 MiB, 2× the P1-M1 IDR size).
     static let highWaterBytes = max(4 << 20, 2 * 31249)
-    /// kind 0 is never dropped; this is where a session stops counting.
-    static let watermark = ChannelOptions.writeBufferWaterMark
 
     /// A helper that cannot stay up after this many tries gives up:
     /// the daemon sends kind 22 goodbye (reconnect: true) to every

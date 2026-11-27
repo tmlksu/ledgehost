@@ -8,6 +8,10 @@ import PackageDescription
 // - Vendor/StreamProtocol: the upstream protocol module, vendored
 //   pristine plus a small Linux patch series. RemoteTLS.swift is
 //   excluded (Network.framework) and replaced by a NIO module later.
+//   Parts of the vendored surface are compiled but unreferenced here
+//   (Audio, MacMenu, Pointer, Gesture, TextScale, DesktopDisplays,
+//   ScrollDirection): kept for protocol completeness — the wire types
+//   document what a full client may send (audit R-4).
 // - Sources/SillLinuxShims: PBKDF2 + CSPRNG shims the vendored code
 //   needs on Linux, kept outside the vendored tree.
 let package = Package(
@@ -63,6 +67,7 @@ let package = Package(
             dependencies: [
                 "LedgehostCore",
                 "StreamProtocol",
+                "SillLinuxShims",
                 .product(name: "Crypto", package: "swift-crypto"),
                 .product(name: "NIO", package: "swift-nio"),
                 .product(name: "NIOCore", package: "swift-nio"),

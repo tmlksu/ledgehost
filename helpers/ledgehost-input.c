@@ -668,7 +668,6 @@ int main(void)
     static unsigned char pending_move[9];
     static int pending_move_n = 0;
     int xfd = ConnectionNumber(dpy);
-    int quit = 0;
     double poll_next = now_sec() + 0.5;
     for (;;) {
         drain_x_events();
@@ -742,7 +741,6 @@ int main(void)
         memmove(buf, buf + off, have - off);
         have -= off;
         if (have == sizeof buf) have = 0;         /* defensive */
-        if (quit) break;
     }
     if (pending_move_n) op_pointer(pending_move, 9);
     release_all();

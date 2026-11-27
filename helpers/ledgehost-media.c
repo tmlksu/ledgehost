@@ -56,7 +56,6 @@ static gint64 pts0 = -1;
 static double last_latency_ms;
 static guint n_records;
 static guint frames_this_second;
-static GstClock *pipe_clock;
 
 static double now_realtime(void)
 {
@@ -383,13 +382,11 @@ int main(int argc, char **argv)
         fputs("media: pipeline failed to start\n", stderr);
         return 2;
     }
-    pipe_clock = gst_pipeline_get_clock(GST_PIPELINE(pipe));
     fprintf(stderr, "media: pipeline up: %s\n", pipe_str);
 
     g_main_loop_run(loop);
 
     gst_element_set_state(pipe, GST_STATE_NULL);
-    gst_object_unref(pipe_clock);
     gst_object_unref(pipe);
     if (last_sets)
         g_byte_array_unref(last_sets);

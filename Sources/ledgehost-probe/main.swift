@@ -115,7 +115,7 @@ if let data = try? Data(contentsOf: savedHostURL) {
 
 final class HostBox: @unchecked Sendable { var fingerprint: Data? }
 
-func makeClientContext(alpn: String, hostBox: HostBox) throws -> NIOSSLContext {
+func makeClientContext(alpn: String) throws -> NIOSSLContext {
     // The probe presents its own self-signed certificate (built by the
     // vendored code) as its client identity.
     let der = SelfSignedCertificate.make(key: deviceKey)!
@@ -176,7 +176,7 @@ let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
 defer { try? group.syncShutdownGracefully() }
 
 func connect(alpn: String, hostBox: HostBox, collector: Collector) throws -> Channel {
-    let context = try makeClientContext(alpn: alpn, hostBox: hostBox)
+    let context = try makeClientContext(alpn: alpn)
     let callback: NIOSSLCustomVerificationCallback = { certs, promise in
         guard let first = certs.first,
               let spki = try? first.extractPublicKey().toSPKIBytes(),

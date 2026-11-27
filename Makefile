@@ -2,7 +2,8 @@
 # separately with `swift build`; this Makefile is only for the helpers
 # and the generated keymap table.
 #
-#   make helpers        build ledgehost-media into bin/
+#   make helpers        build ledgehost-media, ledgehost-input,
+#                       xquery and ledgehost-bar into bin/
 #   make install-debug  also copy the helpers next to the Swift debug
 #                       products (.build/debug/), where ledgehostd
 #                       looks for them

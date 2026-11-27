@@ -51,12 +51,6 @@ def gen_swift(rows):
         comment = " // %s%s" % (n, " - " + c if c else "")
         out.append("        0x%02x: %d,%s" % (h, e, comment))
     out += ["    ]",
-            "",
-            "    /// hidUsage -> X11 keycode (evdev + 8), nil when unmapped.",
-            "    public static func xKeycode(forHIDUsage usage: UInt8) -> UInt16? {",
-            "        guard let ev = hidToEvdev[usage] else { return nil }",
-            "        return ev + 8",
-            "    }",
             "}"]
     return "\n".join(out) + "\n"
 

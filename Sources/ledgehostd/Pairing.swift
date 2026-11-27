@@ -1,6 +1,7 @@
 import Foundation
 import Crypto
 import StreamProtocol
+import SillLinuxShims
 
 // The pairing window (M3): one current code and one current QR secret,
 // five tries per code, the key derived once per rotation (a 600k-round
@@ -43,7 +44,7 @@ final class PairingManager {
             return
         }
         var secret = [UInt8](repeating: 0, count: 16)
-        guard SillRandom.fill(&secret) else {
+        guard Random.fill(&secret) else {
             code = ""; codeKey = nil; qrSecret = Data(); triesLeft = 0
             print(Log.stamp(), "pairing: RNG failed — pairing door closed until the next rotation")
             return

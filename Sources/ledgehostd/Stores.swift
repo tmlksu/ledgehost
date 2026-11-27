@@ -2,6 +2,7 @@ import Foundation
 import Crypto
 import StreamProtocol
 import LedgehostCore
+import SillLinuxShims
 #if canImport(Glibc)
 import Glibc
 #endif
@@ -88,7 +89,7 @@ final class HostIdentity {
         }
         let key = RemoteKey.generate()
         var rk = [UInt8](repeating: 0, count: 32)
-        _ = SillRandom.fill(&rk)
+        _ = Random.fill(&rk)
         let name = ProcessInfo.processInfo.hostName
         let file = IdentityFile(version: 1,
                                 keyX963: RemoteKey.export(key).base64EncodedString(),
@@ -185,20 +186,3 @@ final class PinStore {
     }
 }
 
-/// Random bytes for our own stores (the vendored shims' fill is internal
-/// to that module's use sites; this is the same system source).
-enum SillRandom {
-    static func fill(_ bytes: inout [UInt8]) -> Bool {
-        var rng = SystemRandomNumberGenerator()
-        var i = 0
-        while i < bytes.count {
-            var chunk = rng.next()
-            for _ in 0..<8 where i < bytes.count {
-                bytes[i] = UInt8(chunk & 0xFF)
-                chunk >>= 8
-                i += 1
-            }
-        }
-        return true
-    }
-}

@@ -190,24 +190,27 @@ final class ConnectionHandler: ChannelInboundHandler {
         }
     }
 
-    func send(context: ChannelHandlerContext, kind: StreamMessageKind, payload: Data,
-              keyframe: Bool = false) {
+    /// The one StreamMessage serializer (audit R6): every send path is
+    /// a thin Channel adapter over this.
+    private func send(_ channel: Channel, kind: StreamMessageKind, payload: Data,
+                      keyframe: Bool = false) {
         let message = StreamMessage(kind: kind, timestamp: Date().timeIntervalSince1970,
                                     isKeyframe: keyframe, payload: payload)
-        var out = context.channel.allocator.buffer(capacity: message.serialized().count)
+        var out = channel.allocator.buffer(capacity: message.serialized().count)
         out.writeBytes(message.serialized())
-        context.writeAndFlush(wrapOutboundOut(out), promise: nil)
+        channel.writeAndFlush(out, promise: nil)
+    }
+
+    func send(context: ChannelHandlerContext, kind: StreamMessageKind, payload: Data,
+              keyframe: Bool = false) {
+        send(context.channel, kind: kind, payload: payload, keyframe: keyframe)
     }
 
     /// Same, for call sites outside channel callbacks (registry fan-out
     /// uses deliver() on already-built buffers instead).
     func send(kind: StreamMessageKind, payload: Data, keyframe: Bool = false) {
         guard let channel else { return }
-        var out = channel.allocator.buffer(capacity: payload.count + StreamMessage.headerLength)
-        let message = StreamMessage(kind: kind, timestamp: Date().timeIntervalSince1970,
-                                    isKeyframe: keyframe, payload: payload)
-        out.writeBytes(message.serialized())
-        channel.writeAndFlush(out, promise: nil)
+        send(channel, kind: kind, payload: payload, keyframe: keyframe)
     }
 
     private func handle(context: ChannelHandlerContext, kind: StreamMessageKind, payload: Data) {

@@ -161,7 +161,7 @@ final class KeymapTests: XCTestCase {
     func testKnownMappings() {
         // The decision-8 example: HID 'a' → KEY_A 30 → X keycode 38.
         XCTAssertEqual(Keymap.hidToEvdev[0x04], 30)
-        XCTAssertEqual(Keymap.xKeycode(forHIDUsage: 0x04), 38)
+        XCTAssertEqual(Keymap.hidToEvdev[0x04]! + 8, 38)
         XCTAssertEqual(Keymap.hidToEvdev[0x28], 28)   // Return → KEY_ENTER
         XCTAssertEqual(Keymap.hidToEvdev[0x29], 1)    // Escape → KEY_ESC
         XCTAssertEqual(Keymap.hidToEvdev[0x2c], 57)   // Space
@@ -185,7 +185,7 @@ final class KeymapTests: XCTestCase {
 
     func testUnmappedUsagesReturnNil() {
         for hid: UInt8 in [0x00, 0x01, 0x02, 0x03, 0x86, 0xe8, 0xff] {
-            XCTAssertNil(Keymap.xKeycode(forHIDUsage: hid), "hid 0x\(String(hid, radix: 16))")
+            XCTAssertNil(Keymap.hidToEvdev[hid], "hid 0x\(String(hid, radix: 16))")
         }
     }
 
