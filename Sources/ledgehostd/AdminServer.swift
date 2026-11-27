@@ -67,7 +67,9 @@ final class AdminHandler: ChannelInboundHandler {
         var buf = unwrapInboundIn(data)
         if let bytes = buf.readBytes(length: buf.readableBytes) { pending.append(contentsOf: bytes) }
         guard pending.count >= 4 else { return }
-        let n = Int(pending.withUnsafeBytes { $0.load(as: UInt32.self).bigEndian })
+        // Inline Data storage is not guaranteed aligned — compose the
+        // BE length byte-wise instead of a typed load.
+        let n = pending.prefix(4).reduce(0) { ($0 << 8) | Int($1) }
         guard n <= AdminProtocol.maxRequestBytes else {
             answered = true
             reply(context: context, body: AdminProtocol.err("request over the 64 KiB cap"))
@@ -77,9 +79,15 @@ final class AdminHandler: ChannelInboundHandler {
         answered = true
         let body = pending.subdata(in: 4 ..< 4 + n)
         dispatch(body: body) { replyBody in
-            // `dispatch` may answer from the session event loop — the
-            // write itself must hop back onto this channel's loop.
-            context.eventLoop.execute { self.reply(context: context, body: replyBody) }
+            // Synchronous answers write inline — a client that
+            // half-closes after its request still gets the reply
+            // before the EOF close lands. Async answers (the session-
+            // loop hop) hop back onto this channel's loop.
+            if context.eventLoop.inEventLoop {
+                self.reply(context: context, body: replyBody)
+            } else {
+                context.eventLoop.execute { self.reply(context: context, body: replyBody) }
+            }
         }
     }
 

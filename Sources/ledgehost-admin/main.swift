@@ -127,7 +127,9 @@ func readExact(_ n: Int) -> Data? {
 }
 
 guard let hdr = readExact(4) else { fail("no reply from the daemon") }
-let bodyLen = Int(hdr.withUnsafeBytes { $0.load(as: UInt32.self).bigEndian })
+// Inline Data storage is not guaranteed aligned — compose the BE
+// length byte-wise instead of a typed load.
+let bodyLen = hdr.reduce(0) { ($0 << 8) | Int($1) }
 guard bodyLen <= AdminProtocol.maxResponseBytes else { fail("reply over the cap") }
 guard let body = readExact(bodyLen) else { fail("truncated reply") }
 
