@@ -27,6 +27,41 @@ public enum MediaRecordError: Error, Equatable {
     case timestampOutOfRange
 }
 
+/// The parsed header fields of one LHM1 record, before its payload
+/// arrives. FramedReader's `Header` for the media layout.
+struct MediaFrameHeader {
+    var tag: MediaTag
+    var flags: UInt8
+    var timestamp: Double
+}
+
+extension FramedReader where Header == MediaFrameHeader {
+    /// The LHM1 layout (helpers/ledgehost-ipc.h names the C side):
+    /// magic(4) version(1) tag(1) flags(1) reserved(1) timestamp(8)
+    /// payload len(4), all big endian. Malformed framing throws
+    /// MediaRecordError; an over-cap length is `lengthOverCap` there
+    /// rather than the generic `FrameViolation.oversized` so the
+    /// reader's error surface is unchanged.
+    static func mediaRecords(maxPayload: Int = MediaRecordReader.maxPayload) -> FramedReader {
+        let m = IPCLimits.mediaMagic
+        return FramedReader(headerLength: IPCLimits.mediaHeaderLength,
+                            maxPayload: maxPayload, policy: .fatal) { d in
+            guard d[d.startIndex] == m[0], d[d.startIndex + 1] == m[1],
+                  d[d.startIndex + 2] == m[2], d[d.startIndex + 3] == m[3]
+            else { throw MediaRecordError.badMagic }
+            let version = d[d.startIndex + 4]
+            guard version == IPCLimits.mediaVersion else { throw MediaRecordError.badVersion(version) }
+            let tagByte = d[d.startIndex + 5]
+            guard let tag = MediaTag(rawValue: tagByte) else { throw MediaRecordError.badTag(tagByte) }
+            let flags = d[d.startIndex + 6]
+            let ts = Double(bitPattern: d.readBE(UInt64.self, at: 8))
+            let len = Int(d.readBE(UInt32.self, at: 16))
+            guard len <= maxPayload else { throw MediaRecordError.lengthOverCap(len) }
+            return (MediaFrameHeader(tag: tag, flags: flags, timestamp: ts), len)
+        }
+    }
+}
+
 /// Incremental LHM1 reader. Feed bytes, take complete records.
 /// Validation failure throws; the caller (daemon) kills the helper.
 public struct MediaRecordReader {
@@ -35,7 +70,7 @@ public struct MediaRecordReader {
     public static let maxPayload = IPCLimits.mediaMaxPayload
     public static let magic = IPCLimits.mediaMagic
 
-    private var buffer = Data()
+    private var reader = FramedReader.mediaRecords()
     private let timestampWindow: Double     // seconds either side of now; 0 = unchecked
     private let clock: () -> Double
 
@@ -46,34 +81,12 @@ public struct MediaRecordReader {
     }
 
     public mutating func feed(_ bytes: Data) throws -> [MediaRecord] {
-        buffer.append(bytes)
-        var out: [MediaRecord] = []
-        while buffer.count >= Self.headerLength {
-            let b = buffer
-            guard b[b.startIndex] == Self.magic[0], b[b.startIndex + 1] == Self.magic[1],
-                  b[b.startIndex + 2] == Self.magic[2], b[b.startIndex + 3] == Self.magic[3]
-            else { throw MediaRecordError.badMagic }
-            let version = b[b.startIndex + 4]
-            guard version == IPCLimits.mediaVersion else { throw MediaRecordError.badVersion(version) }
-            let tagByte = b[b.startIndex + 5]
-            guard let tag = MediaTag(rawValue: tagByte) else { throw MediaRecordError.badTag(tagByte) }
-            let flags = b[b.startIndex + 6]
-            let ts = Double(bitPattern: b.readBE(UInt64.self, at: 8))
-            let len = Int(b.readBE(UInt32.self, at: 16))
-            guard len <= Self.maxPayload else { throw MediaRecordError.lengthOverCap(len) }
-            guard buffer.count >= Self.headerLength + len else {
-                if out.isEmpty { return [] }
-                return out
-            }
-            if timestampWindow > 0, abs(ts - clock()) > timestampWindow {
+        try reader.feed(bytes).map { h, payload in
+            if timestampWindow > 0, abs(h.timestamp - clock()) > timestampWindow {
                 throw MediaRecordError.timestampOutOfRange
             }
-            let payload = buffer.subdata(in: buffer.startIndex + Self.headerLength
-                                         ..< buffer.startIndex + Self.headerLength + len)
-            buffer.removeSubrange(buffer.startIndex..<buffer.startIndex + Self.headerLength + len)
-            out.append(MediaRecord(tag: tag, isKeyframe: flags & 1 != 0,
-                                  captureTimestamp: ts, payload: payload))
+            return MediaRecord(tag: h.tag, isKeyframe: h.flags & 1 != 0,
+                               captureTimestamp: h.timestamp, payload: payload)
         }
-        return out
     }
 }

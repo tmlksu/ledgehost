@@ -25,7 +25,7 @@ final class InputService {
     var onClipboard: ((String) -> Void)?  // a foreign client's text
     private var running = false
     private var backoff = RestartBackoff()
-    private var outputBuffer = Data()
+    private var outputReader = InputRecord.outputReader()
 
     init(group: EventLoopGroup, display: String, xauthority: String?) {
         self.loop = group.next()
@@ -89,25 +89,25 @@ final class InputService {
     func releaseHeld() { send([InputRecord.releaseAll]) }
 
     /// Framed records off the helper's stdout (currently op 1,
-    /// CLIPBOARD text changed under a foreign owner).
+    /// CLIPBOARD text changed under a foreign owner). Framing is the
+    /// shared FramedReader (audit Fable R-2).
     private func feed(_ bytes: Data) {
-        outputBuffer.append(contentsOf: bytes)
-        while let total = InputRecord.outputRecordLength(outputBuffer) {
-            guard total > 0 else {
-                print(Log.stamp(), "ledgehostd: input: bad output record — dropping rest")
-                outputBuffer.removeAll(); return
+        outputReader.append(bytes)
+        do {
+            while let (_, rec) = try outputReader.next() {
+                let op = rec[rec.startIndex]
+                let body = rec.subdata(in: rec.index(after: rec.startIndex)..<rec.endIndex)
+                guard op == InputRecord.recordClipboardText else { continue }
+                guard let text = String(data: body, encoding: .utf8) else {
+                    print(Log.stamp(), "ledgehostd: input: clipboard record not UTF-8 — dropped")
+                    continue
+                }
+                let onClipboard = self.onClipboard
+                loop.execute { onClipboard?(text) }
             }
-            guard outputBuffer.count >= total else { return }
-            let rec = outputBuffer.subdata(in: outputBuffer.startIndex..<outputBuffer.startIndex + total)
-            outputBuffer.removeSubrange(outputBuffer.startIndex..<outputBuffer.startIndex + total)
-            guard let (op, body) = InputRecord.parseOutput(rec) else { continue }
-            guard op == InputRecord.recordClipboardText else { continue }
-            guard let text = String(data: body, encoding: .utf8) else {
-                print(Log.stamp(), "ledgehostd: input: clipboard record not UTF-8 — dropped")
-                continue
-            }
-            let onClipboard = self.onClipboard
-            loop.execute { onClipboard?(text) }
+        } catch {
+            print(Log.stamp(), "ledgehostd: input: bad output record — dropping rest")
+            outputReader.clearBuffer()
         }
     }
 }

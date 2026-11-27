@@ -105,6 +105,21 @@ public enum InputRecord {
         record(op: opClipboard, body: Data(text.utf8))
     }
 
+    /// Helper -> daemon stdout framing as a FramedReader layout
+    /// (audit Fable R-2): len(4, BE, body incl op) + body. len 0 is
+    /// malformed; len above the cap trips the reader's oversized
+    /// violation — both mean framing desync. The `Int` header is the
+    /// declared body length, unused by callers.
+    public static func outputReader(policy: FramedReader<Int>.Policy = .fatal)
+        -> FramedReader<Int> {
+        FramedReader(headerLength: IPCLimits.inputHeaderLength,
+                     maxPayload: IPCLimits.inputRecordMax, policy: policy) { d in
+            let len = Int(d.readBE(UInt32.self, at: 0))
+            guard len >= 1 else { throw FrameViolation.invalidHeader }
+            return (len, len)
+        }
+    }
+
     /// Bytes the next helper -> daemon record needs (header + body),
     /// or nil if the buffer does not hold a full record header yet.
     public static func outputRecordLength(_ d: Data) -> Int? {

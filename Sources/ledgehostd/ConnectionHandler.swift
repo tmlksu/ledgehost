@@ -78,7 +78,12 @@ final class ConnectionHandler: ChannelInboundHandler {
 
     private let peer: PeerBox
     private var state: State = .awaitingGate
-    private var buffer = Data()
+    /// Wire framing (FramedReader, audit Fable R-2). The payload cap is
+    /// re-read per record so it tightens/loosens with `state`.
+    private lazy var reader = FramedReader<StreamHeader>.streamMessages { [weak self] in
+        guard let self, self.state == .pairing else { return StreamMessage.maxClientPayload }
+        return StreamMessage.maxPairingPayload
+    }
     private var tick: RepeatedTask?
     /// Deadline for whichever pre-session wait is current: TLS handshake,
     /// pair request, or first Hello (audit S5/F3-lite/F12). Reused so a
@@ -180,24 +185,24 @@ final class ConnectionHandler: ChannelInboundHandler {
 
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
         var buf = unwrapInboundIn(data)
-        if let bytes = buf.readBytes(length: buf.readableBytes) { buffer.append(contentsOf: bytes) }
+        if let bytes = buf.readBytes(length: buf.readableBytes) { reader.append(Data(bytes)) }
         drain(context: context)
     }
 
     private func drain(context: ChannelHandlerContext) {
-        while state != .done {
-            guard buffer.count >= StreamMessage.headerLength,
-                  let header = StreamMessage.parseHeader(buffer) else { return }
-            let cap = state == .pairing ? StreamMessage.maxPairingPayload : StreamMessage.maxClientPayload
-            guard header.payloadLength <= cap else {
-                print(Log.stamp(), "ledgehostd: payload over the cap (\(header.payloadLength) > \(cap)) — closing")
-                context.close(promise: nil); state = .done; return
+        do {
+            // next() interleaves parse and handle so a state change
+            // inside handle() (pairing -> session) takes effect for the
+            // very next record's cap, as before.
+            while state != .done, let (header, payload) = try reader.next() {
+                handle(context: context, kind: header.kind, payload: payload)
             }
-            guard buffer.count >= StreamMessage.headerLength + header.payloadLength else { return }
-            let payload = buffer.subdata(in: buffer.startIndex + StreamMessage.headerLength
-                                         ..< buffer.startIndex + StreamMessage.headerLength + header.payloadLength)
-            buffer.removeSubrange(buffer.startIndex..<buffer.startIndex + StreamMessage.headerLength + header.payloadLength)
-            handle(context: context, kind: header.kind, payload: payload)
+        } catch FrameViolation.oversized(let n, let cap) {
+            print(Log.stamp(), "ledgehostd: payload over the cap (\(n) > \(cap)) — closing")
+            context.close(promise: nil); state = .done
+        } catch {
+            print(Log.stamp(), "ledgehostd: bad client framing — closing")
+            context.close(promise: nil); state = .done
         }
     }
 

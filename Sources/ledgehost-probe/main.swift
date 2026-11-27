@@ -138,18 +138,22 @@ final class Collector: ChannelInboundHandler {
     typealias InboundIn = ByteBuffer
     var onMessage: ((StreamMessageKind, Data, Double) -> Void)?
     var onClose: (() -> Void)?
-    private var buffer = Data()
+    /// Wire framing via the shared FramedReader (audit Fable R-2). The
+    /// probe now enforces the daemon's client payload cap — an over-cap
+    /// frame closes the channel rather than growing the buffer forever
+    /// (the one intended behavior change in the refactoring batch).
+    private var reader = FramedReader<StreamHeader>.streamMessages(
+        maxPayload: StreamMessage.maxClientPayload)
 
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
         var buf = unwrapInboundIn(data)
-        if let bytes = buf.readBytes(length: buf.readableBytes) { buffer.append(contentsOf: bytes) }
-        while buffer.count >= StreamMessage.headerLength,
-              let header = StreamMessage.parseHeader(buffer),
-              buffer.count >= StreamMessage.headerLength + header.payloadLength {
-            let payload = buffer.subdata(in: buffer.startIndex + StreamMessage.headerLength
-                                         ..< buffer.startIndex + StreamMessage.headerLength + header.payloadLength)
-            buffer.removeSubrange(buffer.startIndex..<buffer.startIndex + StreamMessage.headerLength + header.payloadLength)
-            onMessage?(header.kind, payload, header.timestamp)
+        if let bytes = buf.readBytes(length: buf.readableBytes) { reader.append(Data(bytes)) }
+        do {
+            while let (header, payload) = try reader.next() {
+                onMessage?(header.kind, payload, header.timestamp)
+            }
+        } catch {
+            context.close(promise: nil)
         }
     }
 
